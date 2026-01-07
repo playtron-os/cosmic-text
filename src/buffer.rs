@@ -129,9 +129,9 @@ impl<'b> Iterator for LayoutRunIter<'b> {
                 self.total_height += line_height;
 
                 let line_top = self.line_top - self.buffer.scroll.vertical;
-                let glyph_height = layout_line.max_ascent + layout_line.max_descent;
-                let centering_offset = (line_height - glyph_height) / 2.0;
-                let line_y = line_top + centering_offset + layout_line.max_ascent;
+                let font_size = self.buffer.metrics.font_size;
+                let centering_offset = (line_height - font_size) / 2.0;
+                let line_y = line_top + centering_offset + font_size;
                 if let Some(height) = self.buffer.height_opt {
                     if line_y - layout_line.max_ascent > height {
                         return None;
@@ -353,8 +353,13 @@ impl Buffer {
             let mut line_i = layout_cursor.line;
             if line_i <= self.scroll.line {
                 // This is a single line that may wrap
-                if total_height > height + self.scroll.vertical {
+                // Only scroll if content significantly exceeds height (threshold of 2px)
+                // to prevent oscillation due to minor glyph metric variations
+                if total_height > height + self.scroll.vertical + 2.0 {
                     self.scroll.vertical = total_height - height;
+                } else if total_height <= height {
+                    // Content fits - no scroll needed
+                    self.scroll.vertical = 0.0;
                 }
             } else {
                 while line_i > self.scroll.line {
