@@ -500,17 +500,19 @@ fn shape_skip(
 
     let charmap = font.charmap();
     let metrics = font.metrics(&[]);
-    let glyph_metrics = font.glyph_metrics(&[]).scale(1.0);
+    let upem = f32::from(metrics.units_per_em);
+    // Use unscaled metrics and divide by units_per_em, same as Advanced shaping
+    let glyph_metrics = font.glyph_metrics(&[]);
 
-    let ascent = metrics.ascent / f32::from(metrics.units_per_em);
-    let descent = metrics.descent / f32::from(metrics.units_per_em);
+    let ascent = metrics.ascent / upem;
+    let descent = metrics.descent / upem;
 
     glyphs.extend(
         line[start_run..end_run]
             .char_indices()
             .map(|(chr_idx, codepoint)| {
                 let glyph_id = charmap.map(codepoint);
-                let x_advance = glyph_metrics.advance_width(glyph_id)
+                let x_advance = glyph_metrics.advance_width(glyph_id) / upem
                     + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
                 let attrs = attrs_list.get_span(start_run + chr_idx);
 
