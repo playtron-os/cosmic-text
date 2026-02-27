@@ -6,13 +6,29 @@ use alloc::{
     vec::Vec,
 };
 use core::cmp;
+use core::time::Duration;
 
 use unicode_segmentation::UnicodeSegmentation;
+use web_time::Instant;
 
 use crate::{
     Action, Attrs, AttrsList, BorrowedWithFontSystem, BufferLine, BufferRef, Change, ChangeItem,
     Color, Cursor, Edit, FontSystem, LayoutRun, LineEnding, LineIter, Renderer, Selection, Shaping,
 };
+
+/// Debounce timeout for grouping edits - if user pauses longer than this, start new undo group
+const UNDO_DEBOUNCE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// The kind of edit operation for grouping undo
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditKind {
+    Insert,
+    Backspace,
+    Delete,
+    Enter,
+    Indent,
+    Unindent,
+}
 
 /// A wrapper of [`Buffer`] for easy editing
 #[derive(Debug, Clone)]
@@ -24,6 +40,14 @@ pub struct Editor<'buffer> {
     cursor_moved: bool,
     auto_indent: bool,
     change: Option<Change>,
+    undo_stack: Vec<Change>,
+    redo_stack: Vec<Change>,
+    /// Pending change being accumulated (not yet on undo_stack)
+    pending_change: Option<Change>,
+    /// The kind of the pending change for grouping
+    pending_edit_kind: Option<EditKind>,
+    /// Timestamp of last edit for time-based debouncing
+    last_edit_at: Option<Instant>,
 }
 
 fn cursor_glyph_opt(cursor: &Cursor, run: &LayoutRun) -> Option<(usize, f32)> {
@@ -97,6 +121,11 @@ impl<'buffer> Editor<'buffer> {
             cursor_moved: false,
             auto_indent: false,
             change: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            pending_change: None,
+            pending_edit_kind: None,
+            last_edit_at: None,
         }
     }
 
@@ -231,6 +260,46 @@ impl<'buffer> Editor<'buffer> {
                 }
             }
         });
+    }
+
+    /// Commit pending change to undo stack (called when edit type changes or on undo/redo)
+    fn commit_pending(&mut self) {
+        if let Some(change) = self.pending_change.take() {
+            if !change.items.is_empty() {
+                self.undo_stack.push(change);
+            }
+        }
+        self.pending_edit_kind = None;
+    }
+
+    /// Record an edit, grouping consecutive same-type edits together with time-based debouncing
+    fn record_edit(&mut self, kind: EditKind) {
+        if let Some(change) = self.change.take() {
+            if change.items.is_empty() {
+                return;
+            }
+
+            let now = Instant::now();
+            let timed_out = self
+                .last_edit_at
+                .map(|t| now.duration_since(t) > UNDO_DEBOUNCE_TIMEOUT)
+                .unwrap_or(false);
+
+            // Start new undo group if: different action type OR time gap exceeded
+            if self.pending_edit_kind == Some(kind) && !timed_out {
+                // Same kind and within timeout, merge into pending
+                if let Some(ref mut pending) = self.pending_change {
+                    pending.items.extend(change.items);
+                }
+            } else {
+                // Different kind or timed out - commit previous pending and start new
+                self.commit_pending();
+                self.pending_change = Some(change);
+                self.pending_edit_kind = Some(kind);
+            }
+            self.last_edit_at = Some(now);
+            self.redo_stack.clear();
+        }
     }
 }
 
@@ -605,12 +674,16 @@ impl<'buffer> Edit<'buffer> for Editor<'buffer> {
                 } else if character == '\n' {
                     self.action(font_system, Action::Enter);
                 } else {
+                    self.start_change();
                     let mut str_buf = [0u8; 8];
                     let str_ref = character.encode_utf8(&mut str_buf);
                     self.insert_string(str_ref, None);
+                    self.record_edit(EditKind::Insert);
                 }
             }
             Action::Enter => {
+                self.commit_pending(); // Enter is a natural break point
+                self.start_change();
                 //TODO: what about indenting more after opening brackets or parentheses?
                 if self.auto_indent {
                     let mut string = String::from("\n");
@@ -629,6 +702,7 @@ impl<'buffer> Edit<'buffer> for Editor<'buffer> {
                 } else {
                     self.insert_string("\n", None);
                 }
+                self.record_edit(EditKind::Enter);
 
                 // Ensure line is properly shaped and laid out (for potential immediate commands)
                 let line_i = self.cursor.line;
@@ -637,6 +711,7 @@ impl<'buffer> Edit<'buffer> for Editor<'buffer> {
                 });
             }
             Action::Backspace => {
+                self.start_change();
                 if self.delete_selection() {
                     // Deleted selection
                 } else {
@@ -663,8 +738,10 @@ impl<'buffer> Edit<'buffer> for Editor<'buffer> {
                         self.delete_range(self.cursor, end);
                     }
                 }
+                self.record_edit(EditKind::Backspace);
             }
             Action::Delete => {
+                self.start_change();
                 if self.delete_selection() {
                     // Deleted selection
                 } else {
@@ -698,8 +775,10 @@ impl<'buffer> Edit<'buffer> for Editor<'buffer> {
                         self.delete_range(start, end);
                     }
                 }
+                self.record_edit(EditKind::Delete);
             }
             Action::Indent => {
+                self.start_change();
                 // Get start and end of selection
                 let (start, end) = match self.selection_bounds() {
                     Some(some) => some,
@@ -770,8 +849,10 @@ impl<'buffer> Edit<'buffer> for Editor<'buffer> {
                     // Request redraw
                     self.with_buffer_mut(|buffer| buffer.set_redraw(true));
                 }
+                self.record_edit(EditKind::Indent);
             }
             Action::Unindent => {
+                self.start_change();
                 // Get start and end of selection
                 let (start, end) = match self.selection_bounds() {
                     Some(some) => some,
@@ -831,8 +912,10 @@ impl<'buffer> Edit<'buffer> for Editor<'buffer> {
                     // Request redraw
                     self.with_buffer_mut(|buffer| buffer.set_redraw(true));
                 }
+                self.record_edit(EditKind::Unindent);
             }
             Action::Click { x, y } => {
+                self.commit_pending(); // Clicking commits any pending edit
                 self.set_selection(Selection::None);
 
                 if let Some(new_cursor) = self.with_buffer(|buffer| buffer.hit(x as f32, y as f32))
@@ -889,6 +972,25 @@ impl<'buffer> Edit<'buffer> for Editor<'buffer> {
                     scroll.vertical += pixels;
                     buffer.set_scroll(scroll);
                 });
+            }
+            Action::Undo => {
+                self.commit_pending(); // Commit any in-progress edits first
+                if let Some(mut change) = self.undo_stack.pop() {
+                    change.reverse();
+                    self.apply_change(&change);
+                    change.reverse();
+                    self.redo_stack.push(change);
+                    self.with_buffer_mut(|buffer| buffer.set_redraw(true));
+                }
+            }
+            Action::Redo => {
+                self.commit_pending(); // Commit any in-progress edits first
+                if let Some(change) = self.redo_stack.pop() {
+                    // Apply the original change directly (no reverse needed)
+                    self.apply_change(&change);
+                    self.undo_stack.push(change);
+                    self.with_buffer_mut(|buffer| buffer.set_redraw(true));
+                }
             }
         }
 

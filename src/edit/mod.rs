@@ -62,6 +62,10 @@ pub enum Action {
     Scroll {
         pixels: f32,
     },
+    /// Undo the last change
+    Undo,
+    /// Redo the last undone change
+    Redo,
 }
 
 #[derive(Debug)]
