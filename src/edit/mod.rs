@@ -20,7 +20,7 @@ pub use self::vi::*;
 mod vi;
 
 /// An action to perform on an [`Editor`]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     /// Move the cursor with some motion
     Motion(Motion),
@@ -66,6 +66,8 @@ pub enum Action {
     Undo,
     /// Redo the last undone change
     Redo,
+    /// Paste text at current cursor (single undo operation)
+    Paste(String),
 }
 
 #[derive(Debug)]

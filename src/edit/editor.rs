@@ -992,6 +992,18 @@ impl<'buffer> Edit<'buffer> for Editor<'buffer> {
                     self.with_buffer_mut(|buffer| buffer.set_redraw(true));
                 }
             }
+            Action::Paste(text) => {
+                // Paste is a single atomic undo operation (not grouped)
+                self.commit_pending();
+                self.start_change();
+                self.insert_string(&text, None);
+                if let Some(change) = self.finish_change() {
+                    if !change.items.is_empty() {
+                        self.undo_stack.push(change);
+                    }
+                }
+                self.redo_stack.clear();
+            }
         }
 
         if old_cursor != self.cursor {
