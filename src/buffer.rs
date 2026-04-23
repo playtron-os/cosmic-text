@@ -312,7 +312,7 @@ impl Buffer {
         self.redraw = true;
 
         #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
-        log::debug!("relayout: {:?}", instant.elapsed());
+        log::trace!("relayout: {:?}", instant.elapsed());
     }
 
     /// Shape lines until cursor, also scrolling to include cursor in view
