@@ -13,3 +13,8 @@ fontdb = "0.23"
 log = "0.4"
 orbclient = "0.3.50"
 unicode-segmentation = "1.12"
+
+[features]
+# When enabled, the no-argument default loads sample/mono.txt instead of
+# sample/proportional.txt (see src/main.rs).
+mono = []

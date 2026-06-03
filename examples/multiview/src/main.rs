@@ -18,7 +18,9 @@ fn main() {
     let path = if let Some(arg) = env::args().nth(1) {
         arg
     } else {
-        "sample/hello.txt".to_string()
+        // Default sample resolved relative to this crate, so it works no matter
+        // the current working directory.
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../sample/hello.txt").to_string()
     };
 
     let mut font_system = FontSystem::new();

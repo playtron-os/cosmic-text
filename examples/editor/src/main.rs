@@ -54,11 +54,16 @@ fn main() {
 
     let attrs = Attrs::new().family(Family::Monospace);
 
-    match editor.load_text(&path, attrs) {
-        Ok(()) => (),
-        Err(err) => {
-            log::error!("failed to load {:?}: {}", path, err);
+    if path.is_empty() {
+        // No file argument: load a bundled sample so the example shows content
+        // out of the box. `path` stays empty, so Ctrl+S is a no-op rather than
+        // overwriting the repo sample. Pass a path argument to edit/save a file.
+        let sample = concat!(env!("CARGO_MANIFEST_DIR"), "/../../sample/hello.txt");
+        if let Err(err) = editor.load_text(sample, attrs) {
+            log::error!("failed to load sample {:?}: {}", sample, err);
         }
+    } else if let Err(err) = editor.load_text(&path, attrs) {
+        log::error!("failed to load {:?}: {}", path, err);
     }
 
     let mut ctrl_pressed = false;
@@ -252,15 +257,21 @@ fn main() {
                                             }
                                         }
                                         "s" => {
-                                            let mut text = String::new();
-                                            editor.with_buffer(|buffer| {
-                                                for line in buffer.lines.iter() {
-                                                    text.push_str(line.text());
-                                                    text.push_str(line.ending().as_str());
-                                                }
-                                            });
-                                            fs::write(&path, &text).unwrap();
-                                            log::info!("saved {:?}", path);
+                                            if path.is_empty() {
+                                                log::warn!(
+                                                    "no file path given; pass one as an argument to enable saving"
+                                                );
+                                            } else {
+                                                let mut text = String::new();
+                                                editor.with_buffer(|buffer| {
+                                                    for line in buffer.lines.iter() {
+                                                        text.push_str(line.text());
+                                                        text.push_str(line.ending().as_str());
+                                                    }
+                                                });
+                                                fs::write(&path, &text).unwrap();
+                                                log::info!("saved {:?}", path);
+                                            }
                                         }
                                         _ => {}
                                     }

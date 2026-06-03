@@ -42,7 +42,7 @@ pub struct Editor<'buffer> {
     change: Option<Change>,
     undo_stack: Vec<Change>,
     redo_stack: Vec<Change>,
-    /// Pending change being accumulated (not yet on undo_stack)
+    /// Pending change being accumulated (not yet on `undo_stack`)
     pending_change: Option<Change>,
     /// The kind of the pending change for grouping
     pending_edit_kind: Option<EditKind>,

@@ -82,16 +82,19 @@ impl DrawTestCfg {
         self
     }
 
+    #[allow(dead_code)] // part of the shared harness API; not every test uses it
     pub fn wrap(mut self, wrap: Wrap) -> Self {
         self.wrap = wrap;
         self
     }
 
+    #[allow(dead_code)] // part of the shared harness API; not every test uses it
     pub fn ellipsize(mut self, ellipsize: Ellipsize) -> Self {
         self.ellipsize = ellipsize;
         self
     }
 
+    #[allow(dead_code)] // part of the shared harness API; not every test uses it
     pub fn alignment(mut self, alignment: Option<Align>) -> Self {
         self.alignment = alignment;
         self
