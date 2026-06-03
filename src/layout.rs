@@ -2,7 +2,7 @@
 
 use core::fmt::Display;
 
-use crate::{math, CacheKey, CacheKeyFlags, Color};
+use crate::{math, CacheKey, CacheKeyFlags, Color, Decoration};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -58,6 +58,12 @@ pub struct LayoutGlyph {
     pub metadata: usize,
     /// [`CacheKeyFlags`]
     pub cache_key_flags: CacheKeyFlags,
+    /// Underline decoration to draw beneath this glyph. Paint-only.
+    pub underline_opt: Option<Decoration>,
+    /// Strikethrough decoration to draw through this glyph. Paint-only.
+    pub strikethrough_opt: Option<Decoration>,
+    /// Highlight color to draw behind this glyph. Paint-only.
+    pub background_opt: Option<Color>,
 }
 
 #[derive(Clone, Debug)]

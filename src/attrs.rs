@@ -65,6 +65,67 @@ impl Color {
     }
 }
 
+/// The visual style of a text decoration line (underline or strikethrough).
+///
+/// New variants can be added over time without breaking the attribute model;
+/// renderers that do not understand a style should fall back to [`Solid`](Self::Solid).
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum DecorationStyle {
+    /// A single solid line.
+    #[default]
+    Solid,
+    /// Two parallel solid lines.
+    Double,
+    /// A dotted line.
+    Dotted,
+    /// A dashed line.
+    Dashed,
+    /// A wavy line (commonly used for spelling errors).
+    Wavy,
+}
+
+/// A text decoration line such as an underline or strikethrough.
+///
+/// Decorations are paint-only attributes: they do not affect shaping, so a run
+/// may freely mix decorated and undecorated glyphs. The decoration is carried
+/// per-glyph all the way to [`LayoutGlyph`](crate::LayoutGlyph) so any renderer
+/// can draw it using the glyph's geometry.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Decoration {
+    /// Color of the decoration line. `None` inherits the glyph's text color.
+    pub color_opt: Option<Color>,
+    /// Visual style of the decoration line.
+    pub style: DecorationStyle,
+}
+
+impl Decoration {
+    /// A solid decoration that inherits the glyph's text color.
+    pub const fn new() -> Self {
+        Self {
+            color_opt: None,
+            style: DecorationStyle::Solid,
+        }
+    }
+
+    /// Set the decoration [`Color`], overriding the inherited text color.
+    pub const fn color(mut self, color: Color) -> Self {
+        self.color_opt = Some(color);
+        self
+    }
+
+    /// Set the [`DecorationStyle`].
+    pub const fn style(mut self, style: DecorationStyle) -> Self {
+        self.style = style;
+        self
+    }
+}
+
+impl Default for Decoration {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// An owned version of [`Family`]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum FamilyOwned {
@@ -238,6 +299,12 @@ pub struct Attrs<'a> {
     /// Letter spacing (tracking) in EM
     pub letter_spacing_opt: Option<LetterSpacing>,
     pub font_features: FontFeatures,
+    /// Underline decoration, drawn beneath the glyphs. Paint-only.
+    pub underline_opt: Option<Decoration>,
+    /// Strikethrough decoration, drawn through the glyphs. Paint-only.
+    pub strikethrough_opt: Option<Decoration>,
+    /// Highlight color, drawn behind the glyphs. Paint-only.
+    pub background_opt: Option<Color>,
 }
 
 impl<'a> Attrs<'a> {
@@ -256,6 +323,9 @@ impl<'a> Attrs<'a> {
             metrics_opt: None,
             letter_spacing_opt: None,
             font_features: FontFeatures::new(),
+            underline_opt: None,
+            strikethrough_opt: None,
+            background_opt: None,
         }
     }
 
@@ -319,7 +389,29 @@ impl<'a> Attrs<'a> {
         self
     }
 
+    /// Set the underline [`Decoration`]
+    pub const fn underline(mut self, underline: Decoration) -> Self {
+        self.underline_opt = Some(underline);
+        self
+    }
+
+    /// Set the strikethrough [`Decoration`]
+    pub const fn strikethrough(mut self, strikethrough: Decoration) -> Self {
+        self.strikethrough_opt = Some(strikethrough);
+        self
+    }
+
+    /// Set the highlight/background [`Color`], drawn behind the glyphs
+    pub const fn background(mut self, color: Color) -> Self {
+        self.background_opt = Some(color);
+        self
+    }
+
     /// Check if this set of attributes can be shaped with another
+    ///
+    /// Note: paint-only attributes (color, decorations, background) are
+    /// intentionally excluded — they are resolved per-glyph and do not affect
+    /// shaping, so glyphs that differ only in those may share a shape run.
     pub fn compatible(&self, other: &Self) -> bool {
         self.family == other.family
             && self.stretch == other.stretch
@@ -363,6 +455,12 @@ pub struct AttrsOwned {
     /// Letter spacing (tracking) in EM
     pub letter_spacing_opt: Option<LetterSpacing>,
     pub font_features: FontFeatures,
+    /// Underline decoration, drawn beneath the glyphs. Paint-only.
+    pub underline_opt: Option<Decoration>,
+    /// Strikethrough decoration, drawn through the glyphs. Paint-only.
+    pub strikethrough_opt: Option<Decoration>,
+    /// Highlight color, drawn behind the glyphs. Paint-only.
+    pub background_opt: Option<Color>,
 }
 
 impl AttrsOwned {
@@ -378,6 +476,9 @@ impl AttrsOwned {
             metrics_opt: attrs.metrics_opt,
             letter_spacing_opt: attrs.letter_spacing_opt,
             font_features: attrs.font_features.clone(),
+            underline_opt: attrs.underline_opt,
+            strikethrough_opt: attrs.strikethrough_opt,
+            background_opt: attrs.background_opt,
         }
     }
 
@@ -393,6 +494,9 @@ impl AttrsOwned {
             metrics_opt: self.metrics_opt,
             letter_spacing_opt: self.letter_spacing_opt,
             font_features: self.font_features.clone(),
+            underline_opt: self.underline_opt,
+            strikethrough_opt: self.strikethrough_opt,
+            background_opt: self.background_opt,
         }
     }
 }

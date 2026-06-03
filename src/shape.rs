@@ -4,8 +4,8 @@
 
 use crate::fallback::FontFallbackIter;
 use crate::{
-    math, Align, Attrs, AttrsList, CacheKeyFlags, Color, Ellipsize, EllipsizeHeightLimit, Font,
-    FontSystem, Hinting, LayoutGlyph, LayoutLine, Metrics, Wrap,
+    math, Align, Attrs, AttrsList, CacheKeyFlags, Color, Decoration, Ellipsize,
+    EllipsizeHeightLimit, Font, FontSystem, Hinting, LayoutGlyph, LayoutLine, Metrics, Wrap,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec, vec::Vec};
@@ -236,6 +236,9 @@ fn shape_fallback(
             metadata: attrs.metadata,
             cache_key_flags: override_fake_italic(attrs.cache_key_flags, font, &attrs),
             metrics_opt: attrs.metrics_opt.map(Into::into),
+            underline_opt: attrs.underline_opt,
+            strikethrough_opt: attrs.strikethrough_opt,
+            background_opt: attrs.background_opt,
         });
     }
 
@@ -538,6 +541,9 @@ fn shape_skip(
                         &attrs,
                     ),
                     metrics_opt: attrs.metrics_opt.map(Into::into),
+                    underline_opt: attrs.underline_opt,
+                    strikethrough_opt: attrs.strikethrough_opt,
+                    background_opt: attrs.background_opt,
                 }
             }),
     );
@@ -574,6 +580,9 @@ pub struct ShapeGlyph {
     pub metadata: usize,
     pub cache_key_flags: CacheKeyFlags,
     pub metrics_opt: Option<Metrics>,
+    pub underline_opt: Option<Decoration>,
+    pub strikethrough_opt: Option<Decoration>,
+    pub background_opt: Option<Color>,
 }
 
 impl ShapeGlyph {
@@ -603,6 +612,9 @@ impl ShapeGlyph {
             color_opt: self.color_opt,
             metadata: self.metadata,
             cache_key_flags: self.cache_key_flags,
+            underline_opt: self.underline_opt,
+            strikethrough_opt: self.strikethrough_opt,
+            background_opt: self.background_opt,
         }
     }
 
@@ -613,7 +625,7 @@ impl ShapeGlyph {
     }
 }
 
-/// span index used in VlRange to indicate this range is the ellipsis.
+/// span index used in `VlRange` to indicate this range is the ellipsis.
 const ELLIPSIS_SPAN: usize = usize::MAX;
 
 fn shape_ellipsis(
@@ -1944,7 +1956,7 @@ impl ShapeLine {
             .map_or(0.0, |s| s.words.iter().map(|w| w.width(font_size)).sum())
     }
 
-    /// Creates a VlRange for the ellipsis with the given BiDi level.
+    /// Creates a `VlRange` for the ellipsis with the given `BiDi` level.
     fn ellipsis_vlrange(&self, level: unicode_bidi::Level) -> VlRange {
         VlRange {
             span: ELLIPSIS_SPAN,
@@ -1954,7 +1966,7 @@ impl ShapeLine {
         }
     }
 
-    /// Determines the appropriate BiDi level for the ellipsis based on the
+    /// Determines the appropriate `BiDi` level for the ellipsis based on the
     /// adjacent ranges, following UAX#9 N1/N2 rules for neutral characters.
     fn ellipsis_level_between(
         &self,
@@ -2092,12 +2104,6 @@ impl ShapeLine {
         // let mut current_visual_line: Vec<VlRange> = Vec::with_capacity(1);
         let mut current_visual_line = cached_visual_lines.pop().unwrap_or_default();
 
-        // Account for glyph overhang: some glyphs (especially italic or curved letters)
-        // can extend past their advance width. Reserve a small buffer to prevent clipping
-        // the last character on a line. Use ~15% of font_size as a reasonable estimate.
-        let glyph_overhang = font_size * 0.15;
-        let effective_width_opt = width_opt.map(|w| (w - glyph_overhang).max(font_size));
-
         if wrap == Wrap::None {
             self.layout_line(
                 &mut current_visual_line,
@@ -2179,11 +2185,11 @@ impl ShapeLine {
                             // relayouts with that width as the `line_width` will produce the same
                             // wrapping results.
                             if current_visual_line.w + (word_range_width + word_width)
-                            <= effective_width_opt.unwrap_or(f32::INFINITY)
+                            <= width_opt.unwrap_or(f32::INFINITY)
                             // Include one blank word over the width limit since it won't be
                             // counted in the final width
                             || (word.blank
-                                && (current_visual_line.w + word_range_width) <= effective_width_opt.unwrap_or(f32::INFINITY))
+                                && (current_visual_line.w + word_range_width) <= width_opt.unwrap_or(f32::INFINITY))
                             {
                                 // fits
                                 if word.blank {
@@ -2193,12 +2199,12 @@ impl ShapeLine {
                                 word_range_width += word_width;
                             } else if wrap == Wrap::Glyph
                             // Make sure that the word is able to fit on it's own line, if not, fall back to Glyph wrapping.
-                            || (wrap == Wrap::WordOrGlyph && word_width > effective_width_opt.unwrap_or(f32::INFINITY))
+                            || (wrap == Wrap::WordOrGlyph && word_width > width_opt.unwrap_or(f32::INFINITY))
                             {
                                 // Commit the current line so that the word starts on the next line.
                                 if word_range_width > 0.
                                     && wrap == Wrap::WordOrGlyph
-                                    && word_width > effective_width_opt.unwrap_or(f32::INFINITY)
+                                    && word_width > width_opt.unwrap_or(f32::INFINITY)
                                 {
                                     self.add_to_visual_line(
                                         &mut current_visual_line,
@@ -2238,7 +2244,7 @@ impl ShapeLine {
                                 for (glyph_i, glyph) in word.glyphs.iter().enumerate().rev() {
                                     let glyph_width = glyph.width(font_size);
                                     if current_visual_line.w + (word_range_width + glyph_width)
-                                        <= effective_width_opt.unwrap_or(f32::INFINITY)
+                                        <= width_opt.unwrap_or(f32::INFINITY)
                                     {
                                         word_range_width += glyph_width;
                                     } else {
@@ -2362,11 +2368,11 @@ impl ShapeLine {
                         for (i, word) in span.words.iter().enumerate() {
                             let word_width = word.width(font_size);
                             if current_visual_line.w + (word_range_width + word_width)
-                            <= effective_width_opt.unwrap_or(f32::INFINITY)
+                            <= width_opt.unwrap_or(f32::INFINITY)
                             // Include one blank word over the width limit since it won't be
                             // counted in the final width.
                             || (word.blank
-                                && (current_visual_line.w + word_range_width) <= effective_width_opt.unwrap_or(f32::INFINITY))
+                                && (current_visual_line.w + word_range_width) <= width_opt.unwrap_or(f32::INFINITY))
                             {
                                 // fits
                                 if word.blank {
@@ -2376,12 +2382,12 @@ impl ShapeLine {
                                 word_range_width += word_width;
                             } else if wrap == Wrap::Glyph
                             // Make sure that the word is able to fit on it's own line, if not, fall back to Glyph wrapping.
-                            || (wrap == Wrap::WordOrGlyph && word_width > effective_width_opt.unwrap_or(f32::INFINITY))
+                            || (wrap == Wrap::WordOrGlyph && word_width > width_opt.unwrap_or(f32::INFINITY))
                             {
                                 // Commit the current line so that the word starts on the next line.
                                 if word_range_width > 0.
                                     && wrap == Wrap::WordOrGlyph
-                                    && word_width > effective_width_opt.unwrap_or(f32::INFINITY)
+                                    && word_width > width_opt.unwrap_or(f32::INFINITY)
                                 {
                                     self.add_to_visual_line(
                                         &mut current_visual_line,
@@ -2421,7 +2427,7 @@ impl ShapeLine {
                                 for (glyph_i, glyph) in word.glyphs.iter().enumerate() {
                                     let glyph_width = glyph.width(font_size);
                                     if current_visual_line.w + (word_range_width + glyph_width)
-                                        <= effective_width_opt.unwrap_or(f32::INFINITY)
+                                        <= width_opt.unwrap_or(f32::INFINITY)
                                     {
                                         word_range_width += glyph_width;
                                     } else {
@@ -2633,7 +2639,10 @@ impl ShapeLine {
                 for r in visual_line.ranges[range.clone()].iter() {
                     let is_ellipsis = r.span == ELLIPSIS_SPAN;
                     let span_words = self.get_span_words(r.span);
-                    // If ending_glyph is not 0 we need to include glyphs from the ending_word
+                    // If ending_glyph is not 0 we need to include glyphs from the ending_word.
+                    // The index is used for start/end boundary comparisons below, not just
+                    // indexing, so a range loop is the clearest form here.
+                    #[allow(clippy::needless_range_loop)]
                     for i in r.start.word..r.end.word + usize::from(r.end.glyph != 0) {
                         let word = &span_words[i];
                         let included_glyphs = match (i == r.start.word, i == r.end.word) {
