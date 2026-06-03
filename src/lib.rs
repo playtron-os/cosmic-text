@@ -143,6 +143,9 @@ pub use self::swash::*;
 #[cfg(feature = "swash")]
 mod swash;
 
+#[cfg(feature = "swash")]
+mod colr_v1;
+
 mod math;
 
 type BuildHasher = core::hash::BuildHasherDefault<rustc_hash::FxHasher>;

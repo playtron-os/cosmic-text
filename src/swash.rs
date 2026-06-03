@@ -22,6 +22,25 @@ fn swash_image(
         return None;
     };
 
+    // Try COLRv1 rendering via skrifa before falling back to swash.
+    //
+    // The foreground/text color (used for the COLR palette-index-0xFFFF
+    // sentinel) is not available at this cache layer — `swash_image` is keyed
+    // only by `CacheKey`, which does not carry the run color — so we render the
+    // foreground as black. COLR v1 emoji use explicit CPAL colors and are
+    // unaffected; only fonts that reference the foreground sentinel are. Honoring
+    // the real text color would require threading it into the glyph cache key.
+    let face_index = font_system
+        .db()
+        .face(cache_key.font_id)
+        .map(|f| f.index)
+        .unwrap_or(0);
+    if let Some(image) =
+        crate::colr_v1::render_colr_v1(font.data(), face_index, &cache_key, Color::rgb(0, 0, 0))
+    {
+        return Some(image);
+    }
+
     let variable_width = font
         .as_swash()
         .variations()
