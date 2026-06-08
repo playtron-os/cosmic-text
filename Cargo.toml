@@ -14,6 +14,11 @@ bitflags = "2.10.0"
 core_maths = { version = "0.1.1", optional = true }
 cosmic_undo_2 = { version = "0.2.0", optional = true }
 fontdb = { version = "0.23", default-features = false }
+# Pin the transitive font-types (read-fonts/skrifa/harfrust/swash → font-types):
+# 0.11.4 regressed F26Dot6 fixed-point math and collapses rasterized glyph height
+# to 1px, garbling ALL text. Forcing =0.11.3 here fixes every cosmic-text consumer
+# in one place. Remove once fontations ships a fix and bump past 0.11.4.
+font-types = "=0.11.3"
 harfrust = { version = "0.5.0", default-features = false }
 hashbrown = { version = "0.16", optional = true, default-features = false }
 libm = { version = "0.2.16", optional = true }
