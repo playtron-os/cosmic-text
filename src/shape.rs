@@ -1597,6 +1597,12 @@ impl ShapeLine {
             Self::get_glyph_start_end(word, start, span_index, word_idx, direction, congruent);
 
         if forward {
+            // EXCLUSIVE: the caller uses this as a `VlRange` END
+            // (`WordGlyphPos::new(word_idx, glyph_end)` as `end_pos`), and
+            // `layout_to_buffer` slices `&word.glyphs[..r.end.glyph]`. Returning the
+            // index of the last glyph that FIT dropped that glyph from the line while
+            // still counting its width, so the line measured one glyph wider than it
+            // drew. Zero when nothing fits, which `start_glyph_pos` already gives.
             let mut glyph_end = start_glyph_pos;
             for glyph_idx in start_glyph_pos..end_glyph_pos {
                 let g_w = word.glyphs[glyph_idx].width_px(advance);
@@ -1604,10 +1610,12 @@ impl ShapeLine {
                     break;
                 }
                 glyphs_w += g_w;
-                glyph_end = glyph_idx;
+                glyph_end = glyph_idx + 1;
             }
             (glyph_end, glyphs_w)
         } else {
+            // INCLUSIVE: this branch's value is used as a `VlRange` START, so the
+            // lowest index that fit is already the right answer.
             let mut glyph_end = word.glyphs.len();
             for glyph_idx in (start_glyph_pos..end_glyph_pos).rev() {
                 let g_w = word.glyphs[glyph_idx].width_px(advance);

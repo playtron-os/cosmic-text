@@ -22,16 +22,6 @@ fn font_system() -> FontSystem {
     FontSystem::new_with_locale_and_db("en-US".into(), db)
 }
 
-/// Deliberately NOT covered: `Ellipsize`. An ellipsized line breaks this invariant
-/// for a reason older than any of this and unrelated to advances — `fit_glyphs`'s
-/// forward branch returns the index of the last glyph that FIT (`glyph_end =
-/// glyph_idx`, `shape.rs`), and `layout_spans` uses it as an EXCLUSIVE range end, so
-/// the line adds that glyph's width to its measure and then drops the glyph. Inter
-/// 9.5px, "iiii WWWW ....", `Wrap::None`, `Ellipsize::End(Lines(1))`, width 53.7:
-/// `line_w` 46.53 against glyphs summing to 37.51, one whole `W` out. Fixing it
-/// changes which glyph is elided and so re-records the ellipsize reference images,
-/// which is a separate decision from anything here.
-///
 /// Every string long enough to exercise a mix of advances, in both faces the
 /// repository bundles, at sizes whose advances are decidedly fractional.
 const TEXTS: &[&str] = &[
@@ -350,6 +340,72 @@ fn monospace_width_keeps_advances_on_the_cell_grid() {
                 "ls={ls_px:?}: advance {} is {steps} pitches of {pitch}, not a whole number",
                 g.w,
             );
+        }
+    }
+}
+
+// The same invariant under `Ellipsize`, which is where it used to break worst.
+//
+// `fit_glyphs`'s forward branch returned the index of the last glyph that FIT while
+// its caller used that as an EXCLUSIVE range end, so an ellipsized line added a
+// glyph's width to its measure and then dropped the glyph: Inter 9.5px,
+// "iiii WWWW ....", `Wrap::None`, `Ellipsize::End(Lines(1))`, width 53.7 reported
+// `line_w` 46.53 for glyphs summing to 37.51 — one whole `W` out, and a character
+// that fits left undrawn.
+#[test]
+fn an_ellipsized_line_draws_what_it_measures() {
+    use cosmic_text::{Ellipsize, EllipsizeHeightLimit::Lines};
+
+    let mut fs = font_system();
+    let modes = [
+        Ellipsize::End(Lines(1)),
+        Ellipsize::Start(Lines(1)),
+        Ellipsize::Middle(Lines(1)),
+        Ellipsize::End(Lines(2)),
+        Ellipsize::Middle(Lines(2)),
+    ];
+    let texts = [
+        "The quick brown fox jumps over the lazy dog.",
+        "iiii WWWW ....",
+        "Averyveryverylongsinglewordwithnobreaks",
+    ];
+
+    for ellipsize in modes {
+        for text in texts {
+            // Sweep the width so the cut lands between glyphs, not just on one.
+            for step in 0..40 {
+                let width = 40.0 + step as f32 * 3.7;
+                for hinting in [Hinting::Disabled, Hinting::Enabled] {
+                    let mut buf = Buffer::new(&mut fs, Metrics::new(9.5, 14.25));
+                    buf.set_hinting(&mut fs, hinting);
+                    buf.set_wrap(&mut fs, Wrap::None);
+                    buf.set_ellipsize(&mut fs, ellipsize);
+                    buf.set_size(&mut fs, Some(width), Some(40.0));
+                    buf.set_text(
+                        &mut fs,
+                        text,
+                        &Attrs::new().family(Family::Name("Inter")),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    buf.shape_until_scroll(&mut fs, false);
+
+                    for run in buf.layout_runs() {
+                        let sum: f32 = run.glyphs.iter().map(|g| g.w).sum();
+                        assert!(
+                            (sum - run.line_w).abs() < 0.01,
+                            "{ellipsize:?} {hinting:?} w={width} {text:?}: \
+                             line_w {} but the glyphs sum to {sum}",
+                            run.line_w,
+                        );
+                        let right = run.glyphs.iter().map(|g| g.x + g.w).fold(0.0f32, f32::max);
+                        assert!(
+                            right <= width + 0.01,
+                            "{ellipsize:?} {hinting:?} w={width} {text:?}: drew out to {right}",
+                        );
+                    }
+                }
+            }
         }
     }
 }
