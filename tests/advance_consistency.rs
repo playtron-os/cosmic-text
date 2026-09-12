@@ -127,3 +127,118 @@ fn letter_spacing_is_added_after_the_grid_snap() {
         run.line_w,
     );
 }
+
+// A snapped line stays inside the box it was laid out in, whatever its alignment.
+//
+// Two ways it did not. Aligning to the far edge puts the glyphs flush against it,
+// and the line origin was then rounded to NEAREST — so a 178px run of snapped
+// glyphs in a 200.5px box started at `round(22.5) = 23` and ended at 201, half a
+// pixel outside. And justification expansion was applied INSIDE the snap, so the
+// width a space actually gained was `round(a + J) - round(a)` rather than `J`, and
+// a justified line missed the width it was justified into by up to `spaces / 2`
+// px — 202 in a 200.5px box.
+//
+// Both predate the measurement fix above; they only became visible once the width
+// a line reports was the width it draws.
+#[test]
+fn a_snapped_line_stays_inside_its_box() {
+    use cosmic_text::Align;
+
+    let mut fs = font_system();
+    // Deliberately fractional, so rounding the origin has somewhere to go wrong.
+    const W: f32 = 200.5;
+    let cases: &[(&str, &str)] = &[
+        (
+            "Inter",
+            "The quick brown fox jumps over the lazy dog and keeps on running far",
+        ),
+        // RTL, where the line is laid out from the right edge leftwards.
+        (
+            "Noto Sans Hebrew",
+            "שלום עולם זה טקסט ארוך מאוד שצריך לעבור לשורה",
+        ),
+    ];
+
+    for &(family, text) in cases {
+        for align in [
+            Align::Left,
+            Align::Right,
+            Align::Center,
+            Align::End,
+            Align::Justified,
+        ] {
+            for hinting in [Hinting::Disabled, Hinting::Enabled] {
+                let mut buf = Buffer::new(&mut fs, Metrics::new(14.0, 21.0));
+                buf.set_hinting(&mut fs, hinting);
+                buf.set_wrap(&mut fs, Wrap::Word);
+                buf.set_size(&mut fs, Some(W), Some(400.0));
+                buf.set_text(
+                    &mut fs,
+                    text,
+                    &Attrs::new().family(Family::Name(family)),
+                    Shaping::Advanced,
+                    Some(align),
+                );
+                buf.shape_until_scroll(&mut fs, false);
+
+                for run in buf.layout_runs() {
+                    let what = format!("{family} {align:?} {hinting:?}");
+                    let left = run.glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+                    let right = run
+                        .glyphs
+                        .iter()
+                        .map(|g| g.x + g.w)
+                        .fold(f32::MIN, f32::max);
+                    if run.glyphs.is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        left >= -0.01 && right <= W + 0.01,
+                        "{what}: glyphs span {left}..{right}, outside 0..{W}",
+                    );
+                    let sum: f32 = run.glyphs.iter().map(|g| g.w).sum();
+                    assert!(
+                        (sum - run.line_w).abs() < 0.01,
+                        "{what}: line_w {} but the glyphs sum to {sum}",
+                        run.line_w,
+                    );
+                }
+            }
+        }
+    }
+}
+
+// A justified line lands exactly on the width it was justified into, snapped or not.
+#[test]
+fn justification_closes_on_the_line_width() {
+    use cosmic_text::Align;
+
+    let mut fs = font_system();
+    const W: f32 = 200.5;
+    let text = "The quick brown fox jumps over the lazy dog and keeps on running far";
+
+    for hinting in [Hinting::Disabled, Hinting::Enabled] {
+        let mut buf = Buffer::new(&mut fs, Metrics::new(14.0, 21.0));
+        buf.set_hinting(&mut fs, hinting);
+        buf.set_wrap(&mut fs, Wrap::Word);
+        buf.set_size(&mut fs, Some(W), Some(400.0));
+        buf.set_text(
+            &mut fs,
+            text,
+            &Attrs::new().family(Family::Name("Inter")),
+            Shaping::Advanced,
+            Some(Align::Justified),
+        );
+        buf.shape_until_scroll(&mut fs, false);
+
+        let runs: Vec<_> = buf.layout_runs().collect();
+        // Every line but the last is stretched to the full measure.
+        for run in &runs[..runs.len().saturating_sub(1)] {
+            assert!(
+                (run.line_w - W).abs() < 0.01,
+                "{hinting:?}: a justified line came out {} wide in a {W} box",
+                run.line_w,
+            );
+        }
+    }
+}

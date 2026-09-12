@@ -673,7 +673,7 @@ impl ShapeGlyph {
         // original single fused multiply-add and stays bit-for-bit identical.
         if match_mono_em_width.is_some() || hinting == Hinting::Enabled {
             let spacing = glyph_font_size * (self.x_advance - self.x_advance_unspaced);
-            let mut snapped = glyph_font_size.mul_add(self.x_advance_unspaced, justification);
+            let mut snapped = glyph_font_size * self.x_advance_unspaced;
             if let Some(match_em_width) = match_mono_em_width {
                 // Round to nearest monospace width
                 snapped = math::roundf(snapped / match_em_width) * match_em_width;
@@ -681,7 +681,13 @@ impl ShapeGlyph {
             if hinting == Hinting::Enabled {
                 snapped = math::roundf(snapped);
             }
-            x_advance = snapped + spacing;
+            // Justification is a LINE-level distribution — the width left over after
+            // the line was measured, shared among its spaces — so it is not part of
+            // any glyph's advance and does not belong inside the snap. Inside it, the
+            // expansion a space actually got was `round(a + J) - round(a)` rather
+            // than `J`, and a justified line came out up to `spaces / 2` px away from
+            // the width it was justified into.
+            x_advance = snapped + spacing + justification;
         }
 
         (glyph_font_size, x_advance)
@@ -1345,12 +1351,21 @@ impl ShapeLine {
                 for glyph in &mut word.glyphs {
                     if line.get(glyph.start..glyph.end) == Some("\t") {
                         // Tabs are shaped as spaces, so they will always have the x_advance of a space.
+                        //
+                        // TODO: that advance has the span's letter spacing folded
+                        // into it, so the grid pitch is `tab_width` spaces PLUS
+                        // `tab_width` letter spacings — inflated whenever a span
+                        // sets spacing. Fixing it changes tab positions for every
+                        // consumer, snapped or not, so it is left alone here.
                         let tab_x_advance = f32::from(tab_width) * glyph.x_advance;
                         let tab_stop = (math::floorf(x / tab_x_advance) + 1.0) * tab_x_advance;
-                        // A tab's advance IS its own — no letter spacing is folded
-                        // into it — so both records move together.
+                        // The new advance reaches the tab stop, and the span's letter
+                        // spacing rides on a tab the same way it rides on any other
+                        // glyph — so it is carried across rather than absorbed, which
+                        // would have hidden it from the snap.
+                        let letter_spacing = glyph.x_advance - glyph.x_advance_unspaced;
                         glyph.x_advance = tab_stop - x;
-                        glyph.x_advance_unspaced = glyph.x_advance;
+                        glyph.x_advance_unspaced = glyph.x_advance - letter_spacing;
                     }
                     x += glyph.x_advance;
                 }
@@ -2721,7 +2736,23 @@ impl ShapeLine {
             }
 
             if hinting == Hinting::Enabled {
-                x = x.round();
+                // Snap the line's origin toward the START of the line, and never
+                // past the far edge of the box.
+                //
+                // The glyphs on a snapped line span exactly `visual_line.w` from
+                // the origin, and the alignment correction above has already placed
+                // them flush against the far edge, so snapping the origin AWAY from
+                // the start walks that far end outside: 200.5px wide,
+                // `Align::Right`, 178px of glyphs, and `round(22.5) + 178` is 201.
+                //
+                // The clamp is for the case with no slack left to snap into — a
+                // justified line fills a fractional measure exactly, so an RTL one
+                // starting at `ceil(200.5)` would run from 201 down to 0.5.
+                x = if self.rtl {
+                    math::ceilf(x).min(line_width)
+                } else {
+                    math::floorf(x).max(0.0)
+                };
             }
 
             // TODO: Only certain `is_whitespace` chars are typically expanded but this is what is
