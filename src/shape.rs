@@ -1358,13 +1358,18 @@ impl ShapeLine {
             for word in &mut span.words {
                 for glyph in &mut word.glyphs {
                     if line.get(glyph.start..glyph.end) == Some("\t") {
-                        // Tabs are shaped as spaces, so they will always have the x_advance of a space.
+                        // Tabs are shaped as spaces under `Shaping::Advanced`, so
+                        // they carry the x_advance of a space.
                         //
-                        // TODO: that advance has the span's letter spacing folded
-                        // into it, so the grid pitch is `tab_width` spaces PLUS
-                        // `tab_width` letter spacings — inflated whenever a span
-                        // sets spacing. Fixing it changes tab positions for every
-                        // consumer, snapped or not, so it is left alone here.
+                        // TODO: two things are wrong with the pitch below, both older
+                        // than this code and both moving tab positions for every
+                        // consumer if fixed, so both are left alone. (1) That advance
+                        // has the span's letter spacing folded into it, so the pitch
+                        // is `tab_width` spaces PLUS `tab_width` letter spacings.
+                        // (2) Under `Shaping::Basic` the premise does not hold at all:
+                        // `shape_skip` maps the tab codepoint straight through the
+                        // charmap, so the glyph carries the .notdef advance and the
+                        // pitch is `tab_width` .notdefs.
                         let tab_x_advance = f32::from(tab_width) * glyph.x_advance;
                         let tab_stop = (math::floorf(x / tab_x_advance) + 1.0) * tab_x_advance;
                         // A tab's advance is a DISTANCE to a grid stop, not a glyph's

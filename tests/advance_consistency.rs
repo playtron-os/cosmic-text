@@ -22,6 +22,16 @@ fn font_system() -> FontSystem {
     FontSystem::new_with_locale_and_db("en-US".into(), db)
 }
 
+/// Deliberately NOT covered: `Ellipsize`. An ellipsized line breaks this invariant
+/// for a reason older than any of this and unrelated to advances — `fit_glyphs`'s
+/// forward branch returns the index of the last glyph that FIT (`glyph_end =
+/// glyph_idx`, `shape.rs`), and `layout_spans` uses it as an EXCLUSIVE range end, so
+/// the line adds that glyph's width to its measure and then drops the glyph. Inter
+/// 9.5px, "iiii WWWW ....", `Wrap::None`, `Ellipsize::End(Lines(1))`, width 53.7:
+/// `line_w` 46.53 against glyphs summing to 37.51, one whole `W` out. Fixing it
+/// changes which glyph is elided and so re-records the ellipsize reference images,
+/// which is a separate decision from anything here.
+///
 /// Every string long enough to exercise a mix of advances, in both faces the
 /// repository bundles, at sizes whose advances are decidedly fractional.
 const TEXTS: &[&str] = &[
