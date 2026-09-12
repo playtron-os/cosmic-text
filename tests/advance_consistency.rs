@@ -67,3 +67,63 @@ fn line_width_is_the_sum_of_its_glyph_advances() {
         }
     }
 }
+
+// Letter spacing sits OUTSIDE the grid snap.
+//
+// CSS defines `letter-spacing` as space added between glyphs, not as part of a
+// glyph's advance, so what snaps to the pixel grid is the glyph's own advance and
+// the spacing rides on top of it unsnapped. `Hinting::Enabled` used to round the
+// sum, because the spacing had already been folded into `ShapeGlyph::x_advance` at
+// shape time and could not be told apart again.
+//
+// The numbers below are Chrome's, measured on Geist Mono at 9.5px with
+// `letter-spacing: 0.12em` (= 1.14px): every glyph advances 7.1406 and the line
+// total is 121.3906 — fractional, which it could not be if the spacing were inside
+// the round. Fira Mono stands in for Geist Mono here because it is the monospace
+// face this repository bundles; the arithmetic under test is the same.
+#[test]
+fn letter_spacing_is_added_after_the_grid_snap() {
+    let mut fs = font_system();
+    let size = 9.5f32;
+    let spacing = 1.14f32;
+
+    let mut exact = Buffer::new(&mut fs, Metrics::new(size, size * 1.5));
+    exact.set_wrap(&mut fs, Wrap::None);
+    let attrs = Attrs::new()
+        .family(Family::Name("Fira Mono"))
+        .letter_spacing(spacing / size);
+    exact.set_text(&mut fs, "MMMMMMMMMM", &attrs, Shaping::Advanced, None);
+    exact.shape_until_scroll(&mut fs, false);
+    let unspaced_advance = {
+        let run = exact.layout_runs().next().unwrap();
+        run.glyphs[0].w - spacing
+    };
+
+    let mut hinted = Buffer::new(&mut fs, Metrics::new(size, size * 1.5));
+    hinted.set_hinting(&mut fs, Hinting::Enabled);
+    hinted.set_wrap(&mut fs, Wrap::None);
+    hinted.set_text(&mut fs, "MMMMMMMMMM", &attrs, Shaping::Advanced, None);
+    hinted.shape_until_scroll(&mut fs, false);
+
+    let run = hinted.layout_runs().next().unwrap();
+    let want = unspaced_advance.round() + spacing;
+    for g in run.glyphs {
+        assert!(
+            (g.w - want).abs() < 0.001,
+            "glyph advanced {} but round({unspaced_advance}) + {spacing} = {want}",
+            g.w,
+        );
+    }
+    // The tell: a line of snapped advances plus unsnapped spacing is fractional.
+    assert!(
+        (run.line_w - want * 10.0).abs() < 0.01,
+        "line_w {} but 10 glyphs of {want} is {}",
+        run.line_w,
+        want * 10.0,
+    );
+    assert!(
+        (run.line_w - run.line_w.round()).abs() > 0.01,
+        "line_w {} is a whole number, so the spacing was rounded with the advance",
+        run.line_w,
+    );
+}

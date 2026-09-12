@@ -212,8 +212,9 @@ fn shape_fallback(
         }
 
         let attrs = attrs_list.get_span(start_glyph);
-        let x_advance = pos.x_advance as f32 / font_scale
-            + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
+        let x_advance_unspaced = pos.x_advance as f32 / font_scale;
+        let x_advance =
+            x_advance_unspaced + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
         let y_advance = pos.y_advance as f32 / font_scale;
         let x_offset = pos.x_offset as f32 / font_scale;
         let y_offset = pos.y_offset as f32 / font_scale;
@@ -222,6 +223,7 @@ fn shape_fallback(
             start: start_glyph,
             end: end_run, // Set later
             x_advance,
+            x_advance_unspaced,
             y_advance,
             x_offset,
             y_offset,
@@ -516,14 +518,16 @@ fn shape_skip(
             .char_indices()
             .map(|(chr_idx, codepoint)| {
                 let glyph_id = charmap.map(codepoint);
-                let x_advance = glyph_metrics.advance_width(glyph_id) / upem
-                    + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
+                let x_advance_unspaced = glyph_metrics.advance_width(glyph_id) / upem;
+                let x_advance =
+                    x_advance_unspaced + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
                 let attrs = attrs_list.get_span(start_run + chr_idx);
 
                 ShapeGlyph {
                     start: chr_idx + start_run,
                     end: chr_idx + start_run + codepoint.len_utf8(),
                     x_advance,
+                    x_advance_unspaced,
                     y_advance: 0.0,
                     x_offset: 0.0,
                     y_offset: 0.0,
@@ -567,6 +571,13 @@ pub struct ShapeGlyph {
     pub start: usize,
     pub end: usize,
     pub x_advance: f32,
+    /// The shaper's own advance for this glyph, in em units, WITHOUT the span's
+    /// [`Attrs::letter_spacing`](crate::Attrs::letter_spacing).
+    ///
+    /// `x_advance` keeps its meaning — advance plus spacing — and this records how
+    /// much of it is the glyph's own. Snapping advances to a grid has to snap this
+    /// and add the spacing afterwards; see [`ShapeGlyph::advance_px`].
+    pub x_advance_unspaced: f32,
     pub y_advance: f32,
     pub x_offset: f32,
     pub y_offset: f32,
@@ -650,12 +661,27 @@ impl ShapeGlyph {
         };
 
         let mut x_advance = glyph_font_size.mul_add(self.x_advance, justification);
-        if let Some(match_em_width) = match_mono_em_width {
-            // Round to nearest monospace width
-            x_advance = math::roundf(x_advance / match_em_width) * match_em_width;
-        }
-        if hinting == Hinting::Enabled {
-            x_advance = math::roundf(x_advance);
+
+        // Letter spacing is space added BETWEEN glyphs, not part of a glyph's
+        // advance — so when advances snap to a grid, what snaps is the glyph's own
+        // advance and the spacing rides on top of it, unsnapped. Measured in
+        // Chrome: Geist Mono at 9.5px with `letter-spacing: 0.12em` advances
+        // 6.00 + 1.14 = 7.14 per glyph, and the line total comes back fractional —
+        // which it could not be if the spacing were inside the round.
+        //
+        // Skipped entirely when nothing snaps, so the common path keeps its
+        // original single fused multiply-add and stays bit-for-bit identical.
+        if match_mono_em_width.is_some() || hinting == Hinting::Enabled {
+            let spacing = glyph_font_size * (self.x_advance - self.x_advance_unspaced);
+            let mut snapped = glyph_font_size.mul_add(self.x_advance_unspaced, justification);
+            if let Some(match_em_width) = match_mono_em_width {
+                // Round to nearest monospace width
+                snapped = math::roundf(snapped / match_em_width) * match_em_width;
+            }
+            if hinting == Hinting::Enabled {
+                snapped = math::roundf(snapped);
+            }
+            x_advance = snapped + spacing;
         }
 
         (glyph_font_size, x_advance)
@@ -1321,7 +1347,10 @@ impl ShapeLine {
                         // Tabs are shaped as spaces, so they will always have the x_advance of a space.
                         let tab_x_advance = f32::from(tab_width) * glyph.x_advance;
                         let tab_stop = (math::floorf(x / tab_x_advance) + 1.0) * tab_x_advance;
+                        // A tab's advance IS its own — no letter spacing is folded
+                        // into it — so both records move together.
                         glyph.x_advance = tab_stop - x;
+                        glyph.x_advance_unspaced = glyph.x_advance;
                     }
                     x += glyph.x_advance;
                 }
