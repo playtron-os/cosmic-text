@@ -585,7 +585,88 @@ pub struct ShapeGlyph {
     pub background_opt: Option<Color>,
 }
 
+/// Everything needed to turn a shaped glyph's em advance into the pixel advance it
+/// is laid out with.
+///
+/// It exists so there is exactly ONE such conversion. Before it, the placement
+/// path did the mono snap and the hinting round while the measurement path
+/// ([`ShapeGlyph::width`], and so [`LayoutLine::w`]) did neither — a line reported
+/// a width its own glyphs did not add up to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Advance {
+    /// The run's font size in pixels. A glyph's own [`ShapeGlyph::metrics_opt`]
+    /// overrides it.
+    pub font_size: f32,
+    /// The monospace width to snap to, when `monospace_fallback` is in play.
+    pub match_mono_width: Option<f32>,
+    /// Whether advances are snapped to whole pixels.
+    pub hinting: Hinting,
+}
+
+impl Advance {
+    /// An [`Advance`] that does nothing but scale by `font_size` — the behaviour
+    /// [`ShapeGlyph::width`] has always had.
+    #[must_use]
+    pub const fn exact(font_size: f32) -> Self {
+        Self {
+            font_size,
+            match_mono_width: None,
+            hinting: Hinting::Disabled,
+        }
+    }
+}
+
 impl ShapeGlyph {
+    /// The font size this glyph is laid out at, and its advance in pixels.
+    ///
+    /// The one place an em advance becomes a pixel advance. Call it from anything
+    /// that measures as well as anything that places, or the two drift apart.
+    ///
+    /// `justification` is the extra width a blank glyph carries on a justified
+    /// line; pass `0.0` when measuring.
+    #[must_use]
+    pub fn advance_px(&self, advance: Advance, justification: f32) -> (f32, f32) {
+        let Advance {
+            font_size,
+            match_mono_width,
+            hinting,
+        } = advance;
+
+        // Use overridden font size
+        let font_size = self.metrics_opt.map_or(font_size, |x| x.font_size);
+
+        let match_mono_em_width = match_mono_width.map(|w| w / font_size);
+
+        let glyph_font_size = match (match_mono_em_width, self.font_monospace_em_width) {
+            (Some(match_em_width), Some(glyph_em_width)) if glyph_em_width != match_em_width => {
+                let glyph_to_match_factor = glyph_em_width / match_em_width;
+                let glyph_font_size = math::roundf(glyph_to_match_factor).max(1.0)
+                    / glyph_to_match_factor
+                    * font_size;
+                log::trace!("Adjusted glyph font size ({font_size} => {glyph_font_size})");
+                glyph_font_size
+            }
+            _ => font_size,
+        };
+
+        let mut x_advance = glyph_font_size.mul_add(self.x_advance, justification);
+        if let Some(match_em_width) = match_mono_em_width {
+            // Round to nearest monospace width
+            x_advance = math::roundf(x_advance / match_em_width) * match_em_width;
+        }
+        if hinting == Hinting::Enabled {
+            x_advance = math::roundf(x_advance);
+        }
+
+        (glyph_font_size, x_advance)
+    }
+
+    /// The glyph's advance in pixels under `advance`.
+    #[must_use]
+    pub fn width_px(&self, advance: Advance) -> f32 {
+        self.advance_px(advance, 0.0).1
+    }
+
     const fn layout(
         &self,
         font_size: f32,
@@ -798,9 +879,16 @@ impl ShapeWord {
 
     /// Get the width of the [`ShapeWord`] in pixels, using the [`ShapeGlyph::width`] function.
     pub fn width(&self, font_size: f32) -> f32 {
+        self.width_px(Advance::exact(font_size))
+    }
+
+    /// The word's width in pixels under `advance`, summed the same way the glyphs
+    /// are placed — see [`ShapeGlyph::advance_px`].
+    #[must_use]
+    pub fn width_px(&self, advance: Advance) -> f32 {
         let mut width = 0.0;
         for glyph in &self.glyphs {
-            width += glyph.width(font_size);
+            width += glyph.width_px(advance);
         }
         width
     }
@@ -1433,7 +1521,7 @@ impl ShapeLine {
 
     fn fit_glyphs(
         word: &ShapeWord,
-        font_size: f32,
+        advance: Advance,
         start: SpanWordGlyphPos,
         span_index: usize,
         word_idx: usize,
@@ -1450,7 +1538,7 @@ impl ShapeLine {
         if forward {
             let mut glyph_end = start_glyph_pos;
             for glyph_idx in start_glyph_pos..end_glyph_pos {
-                let g_w = word.glyphs[glyph_idx].width(font_size);
+                let g_w = word.glyphs[glyph_idx].width_px(advance);
                 if currently_used_width + glyphs_w + g_w > total_available_width {
                     break;
                 }
@@ -1461,7 +1549,7 @@ impl ShapeLine {
         } else {
             let mut glyph_end = word.glyphs.len();
             for glyph_idx in (start_glyph_pos..end_glyph_pos).rev() {
-                let g_w = word.glyphs[glyph_idx].width(font_size);
+                let g_w = word.glyphs[glyph_idx].width_px(advance);
                 if currently_used_width + glyphs_w + g_w > total_available_width {
                     break;
                 }
@@ -1504,7 +1592,7 @@ impl ShapeLine {
     fn layout_spans(
         &self,
         current_visual_line: &mut VisualLine,
-        font_size: f32,
+        advance: Advance,
         spans: &[ShapeSpan],
         start_opt: Option<SpanWordGlyphPos>,
         rtl: bool,
@@ -1583,11 +1671,11 @@ impl ShapeLine {
                     );
                     let mut w = 0.;
                     for glyph_idx in start_glyph_pos..end_glyph_pos {
-                        w += word.glyphs[glyph_idx].width(font_size);
+                        w += word.glyphs[glyph_idx].width_px(advance);
                     }
                     w
                 } else {
-                    word.width(font_size)
+                    word.width_px(advance)
                 };
 
                 let overflowing = {
@@ -1623,7 +1711,7 @@ impl ShapeLine {
 
                     let (glyph_end, glyphs_w) = Self::fit_glyphs(
                         word,
-                        font_size,
+                        advance,
                         start,
                         span_index,
                         word_idx,
@@ -1744,7 +1832,7 @@ impl ShapeLine {
     fn layout_middle(
         &self,
         current_visual_line: &mut VisualLine,
-        font_size: f32,
+        advance: Advance,
         spans: &[ShapeSpan],
         start_opt: Option<SpanWordGlyphPos>,
         rtl: bool,
@@ -1756,7 +1844,7 @@ impl ShapeLine {
         let mut starting_line = VisualLine::default();
         self.layout_spans(
             &mut starting_line,
-            font_size,
+            advance,
             spans,
             start_opt,
             rtl,
@@ -1787,7 +1875,7 @@ impl ShapeLine {
                 };
                 self.layout_spans(
                     &mut ending_line,
-                    font_size,
+                    advance,
                     spans,
                     Some(start),
                     rtl,
@@ -1847,7 +1935,7 @@ impl ShapeLine {
                 } else {
                     self.layout_spans(
                         current_visual_line,
-                        font_size,
+                        advance,
                         spans,
                         start_opt,
                         rtl,
@@ -1950,10 +2038,10 @@ impl ShapeLine {
     }
 
     /// Returns the width of the ellipsis in the given font size.
-    fn ellipsis_w(&self, font_size: f32) -> f32 {
+    fn ellipsis_w(&self, advance: Advance) -> f32 {
         self.ellipsis_span
             .as_ref()
-            .map_or(0.0, |s| s.words.iter().map(|w| w.width(font_size)).sum())
+            .map_or(0.0, |s| s.words.iter().map(|w| w.width_px(advance)).sum())
     }
 
     /// Creates a `VlRange` for the ellipsis with the given `BiDi` level.
@@ -1990,20 +2078,20 @@ impl ShapeLine {
     fn layout_line(
         &self,
         current_visual_line: &mut VisualLine,
-        font_size: f32,
+        advance: Advance,
         spans: &[ShapeSpan],
         start_opt: Option<SpanWordGlyphPos>,
         rtl: bool,
         width_opt: Option<f32>,
         ellipsize: Ellipsize,
     ) {
-        let ellipsis_w = self.ellipsis_w(font_size);
+        let ellipsis_w = self.ellipsis_w(advance);
 
         match (ellipsize, width_opt) {
             (Ellipsize::Start(_), Some(_)) => {
                 self.layout_spans(
                     current_visual_line,
-                    font_size,
+                    advance,
                     spans,
                     start_opt,
                     rtl,
@@ -2025,7 +2113,7 @@ impl ShapeLine {
             (Ellipsize::Middle(_), Some(width)) => {
                 self.layout_middle(
                     current_visual_line,
-                    font_size,
+                    advance,
                     spans,
                     start_opt,
                     rtl,
@@ -2037,7 +2125,7 @@ impl ShapeLine {
             _ => {
                 self.layout_spans(
                     current_visual_line,
-                    font_size,
+                    advance,
                     spans,
                     start_opt,
                     rtl,
@@ -2079,6 +2167,14 @@ impl ShapeLine {
         match_mono_width: Option<f32>,
         hinting: Hinting,
     ) {
+        // One value, built once, so measuring and placing cannot disagree about how
+        // wide a glyph is — see `ShapeGlyph::advance_px`.
+        let advance = Advance {
+            font_size,
+            match_mono_width,
+            hinting,
+        };
+
         // For each visual line a list of  (span index,  and range of words in that span)
         // Note that a BiDi visual line could have multiple spans or parts of them
         // let mut vl_range_of_spans = Vec::with_capacity(1);
@@ -2107,7 +2203,7 @@ impl ShapeLine {
         if wrap == Wrap::None {
             self.layout_line(
                 &mut current_visual_line,
-                font_size,
+                advance,
                 &self.spans,
                 None,
                 self.rtl,
@@ -2136,7 +2232,7 @@ impl ShapeLine {
             let try_ellipsize_last_line = |total_line_count: usize,
                                            total_line_height: f32,
                                            current_visual_line: &mut VisualLine,
-                                           font_size: f32,
+                                           advance: Advance,
                                            start_opt: Option<SpanWordGlyphPos>,
                                            width_opt: Option<f32>,
                                            ellipsize: Ellipsize|
@@ -2149,7 +2245,7 @@ impl ShapeLine {
                 {
                     self.layout_line(
                         current_visual_line,
-                        font_size,
+                        advance,
                         &self.spans,
                         start_opt,
                         self.rtl,
@@ -2165,7 +2261,7 @@ impl ShapeLine {
                 total_line_count,
                 total_line_height,
                 &mut current_visual_line,
-                font_size,
+                advance,
                 None,
                 width_opt,
                 ellipsize,
@@ -2180,7 +2276,7 @@ impl ShapeLine {
                         // incongruent directions
                         let mut fitting_start = WordGlyphPos::new(span.words.len(), 0);
                         for (i, word) in span.words.iter().enumerate().rev() {
-                            let word_width = word.width(font_size);
+                            let word_width = word.width_px(advance);
                             // Addition in the same order used to compute the final width, so that
                             // relayouts with that width as the `line_width` will produce the same
                             // wrapping results.
@@ -2229,7 +2325,7 @@ impl ShapeLine {
                                         total_line_count,
                                         total_line_height,
                                         &mut current_visual_line,
-                                        font_size,
+                                        advance,
                                         Some(SpanWordGlyphPos::with_wordglyph(
                                             span_index,
                                             fitting_start,
@@ -2242,7 +2338,7 @@ impl ShapeLine {
                                 }
 
                                 for (glyph_i, glyph) in word.glyphs.iter().enumerate().rev() {
-                                    let glyph_width = glyph.width(font_size);
+                                    let glyph_width = glyph.width_px(advance);
                                     if current_visual_line.w + (word_range_width + glyph_width)
                                         <= width_opt.unwrap_or(f32::INFINITY)
                                     {
@@ -2269,7 +2365,7 @@ impl ShapeLine {
                                             total_line_count,
                                             total_line_height,
                                             &mut current_visual_line,
-                                            font_size,
+                                            advance,
                                             Some(SpanWordGlyphPos::with_wordglyph(
                                                 span_index,
                                                 fitting_start,
@@ -2329,7 +2425,7 @@ impl ShapeLine {
                                         total_line_count,
                                         total_line_height,
                                         &mut current_visual_line,
-                                        font_size,
+                                        advance,
                                         Some(SpanWordGlyphPos::with_wordglyph(
                                             span_index,
                                             if word.blank {
@@ -2366,7 +2462,7 @@ impl ShapeLine {
                         // congruent direction
                         let mut fitting_start = WordGlyphPos::ZERO;
                         for (i, word) in span.words.iter().enumerate() {
-                            let word_width = word.width(font_size);
+                            let word_width = word.width_px(advance);
                             if current_visual_line.w + (word_range_width + word_width)
                             <= width_opt.unwrap_or(f32::INFINITY)
                             // Include one blank word over the width limit since it won't be
@@ -2412,7 +2508,7 @@ impl ShapeLine {
                                         total_line_count,
                                         total_line_height,
                                         &mut current_visual_line,
-                                        font_size,
+                                        advance,
                                         Some(SpanWordGlyphPos::with_wordglyph(
                                             span_index,
                                             fitting_start,
@@ -2425,7 +2521,7 @@ impl ShapeLine {
                                 }
 
                                 for (glyph_i, glyph) in word.glyphs.iter().enumerate() {
-                                    let glyph_width = glyph.width(font_size);
+                                    let glyph_width = glyph.width_px(advance);
                                     if current_visual_line.w + (word_range_width + glyph_width)
                                         <= width_opt.unwrap_or(f32::INFINITY)
                                     {
@@ -2452,7 +2548,7 @@ impl ShapeLine {
                                             total_line_count,
                                             total_line_height,
                                             &mut current_visual_line,
-                                            font_size,
+                                            advance,
                                             Some(SpanWordGlyphPos::with_wordglyph(
                                                 span_index,
                                                 fitting_start,
@@ -2506,7 +2602,7 @@ impl ShapeLine {
                                         total_line_count,
                                         total_line_height,
                                         &mut current_visual_line,
-                                        font_size,
+                                        advance,
                                         Some(SpanWordGlyphPos::with_wordglyph(
                                             span_index,
                                             if i > 0 && span.words[i - 1].blank {
@@ -2653,46 +2749,14 @@ impl ShapeLine {
                         };
 
                         for glyph in included_glyphs {
-                            // Use overridden font size
-                            let font_size = glyph.metrics_opt.map_or(font_size, |x| x.font_size);
-
-                            let match_mono_em_width = match_mono_width.map(|w| w / font_size);
-
-                            let glyph_font_size = match (
-                                match_mono_em_width,
-                                glyph.font_monospace_em_width,
-                            ) {
-                                (Some(match_em_width), Some(glyph_em_width))
-                                    if glyph_em_width != match_em_width =>
-                                {
-                                    let glyph_to_match_factor = glyph_em_width / match_em_width;
-                                    let glyph_font_size = math::roundf(glyph_to_match_factor)
-                                        .max(1.0)
-                                        / glyph_to_match_factor
-                                        * font_size;
-                                    log::trace!(
-                                        "Adjusted glyph font size ({font_size} => {glyph_font_size})"
-                                    );
-                                    glyph_font_size
-                                }
-                                _ => font_size,
-                            };
-
-                            let mut x_advance = glyph_font_size.mul_add(
-                                glyph.x_advance,
+                            let (glyph_font_size, x_advance) = glyph.advance_px(
+                                advance,
                                 if word.blank {
                                     justification_expansion
                                 } else {
                                     0.0
                                 },
                             );
-                            if let Some(match_em_width) = match_mono_em_width {
-                                // Round to nearest monospace width
-                                x_advance = ((x_advance / match_em_width).round()) * match_em_width;
-                            }
-                            if hinting == Hinting::Enabled {
-                                x_advance = x_advance.round();
-                            }
                             if self.rtl {
                                 *x -= x_advance;
                             }
