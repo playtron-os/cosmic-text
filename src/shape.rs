@@ -671,16 +671,14 @@ impl ShapeGlyph {
         //
         // Skipped entirely when nothing snaps, so the common path keeps its
         // original single fused multiply-add and stays bit-for-bit identical.
-        if match_mono_em_width.is_some() || hinting == Hinting::Enabled {
+        if hinting == Hinting::Enabled {
             let spacing = glyph_font_size * (self.x_advance - self.x_advance_unspaced);
             let mut snapped = glyph_font_size * self.x_advance_unspaced;
             if let Some(match_em_width) = match_mono_em_width {
                 // Round to nearest monospace width
                 snapped = math::roundf(snapped / match_em_width) * match_em_width;
             }
-            if hinting == Hinting::Enabled {
-                snapped = math::roundf(snapped);
-            }
+            snapped = math::roundf(snapped);
             // Justification is a LINE-level distribution — the width left over after
             // the line was measured, shared among its spaces — so it is not part of
             // any glyph's advance and does not belong inside the snap. Inside it, the
@@ -688,6 +686,16 @@ impl ShapeGlyph {
             // than `J`, and a justified line came out up to `spaces / 2` px away from
             // the width it was justified into.
             x_advance = snapped + spacing + justification;
+        } else if let Some(match_em_width) = match_mono_em_width {
+            // Round to nearest monospace width.
+            //
+            // Left exactly as it was, on the advance WITH its letter spacing.
+            // `Buffer::set_monospace_width` is a default-features API whose callers
+            // derive the width from a cell and rely on every advance being a whole
+            // number of pitches; whether letter spacing belongs inside a CELL snap is
+            // a separate question from the pixel grid, and answering it here would
+            // move glyphs for a consumer that never asked for hinting.
+            x_advance = math::roundf(x_advance / match_em_width) * match_em_width;
         }
 
         (glyph_font_size, x_advance)
@@ -1359,13 +1367,17 @@ impl ShapeLine {
                         // consumer, snapped or not, so it is left alone here.
                         let tab_x_advance = f32::from(tab_width) * glyph.x_advance;
                         let tab_stop = (math::floorf(x / tab_x_advance) + 1.0) * tab_x_advance;
-                        // The new advance reaches the tab stop, and the span's letter
-                        // spacing rides on a tab the same way it rides on any other
-                        // glyph — so it is carried across rather than absorbed, which
-                        // would have hidden it from the snap.
-                        let letter_spacing = glyph.x_advance - glyph.x_advance_unspaced;
+                        // A tab's advance is a DISTANCE to a grid stop, not a glyph's
+                        // own advance, so none of it is a candidate for the pixel
+                        // snap: the stop is computed in em against an em pen and
+                        // cannot land on a whole pixel anyway. Recording zero as the
+                        // snappable part leaves the whole advance exact, which keeps
+                        // the stop and keeps the advance non-negative — subtracting
+                        // the letter spacing out of it instead went negative whenever
+                        // the pen was already within one spacing of the next stop, and
+                        // laid the following glyph out to the LEFT of the tab.
                         glyph.x_advance = tab_stop - x;
-                        glyph.x_advance_unspaced = glyph.x_advance - letter_spacing;
+                        glyph.x_advance_unspaced = 0.0;
                     }
                     x += glyph.x_advance;
                 }

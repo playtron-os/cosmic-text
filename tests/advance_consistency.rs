@@ -242,3 +242,104 @@ fn justification_closes_on_the_line_width() {
         }
     }
 }
+
+// No glyph ever advances backwards, and a tab still reaches its stop.
+//
+// A tab's advance is a DISTANCE to a grid stop rather than a glyph's own advance,
+// so it is held out of the pixel snap entirely. Subtracting the span's letter
+// spacing out of it instead went negative whenever the pen was already within one
+// spacing of the next stop — `roundf(-0.5)` is `-1.0`, so a 14px tab with 0.8px of
+// spacing advanced -0.2px and laid the following glyph out to the LEFT of the tab's
+// own origin.
+//
+// No other test in this repository contains a tab character.
+#[test]
+fn a_tab_advances_forwards_and_lands_on_its_stop() {
+    let mut fs = font_system();
+
+    for hinting in [Hinting::Disabled, Hinting::Enabled] {
+        for ls_px in [None, Some(0.8f32), Some(1.14), Some(-0.3)] {
+            // Several pen positions before the tab, to walk it around a stop.
+            for lead in ["", "M", "Mm", "Mm.", "Mm. a", "Mm. aMlW"] {
+                let text = format!("{lead}\tX");
+                let mut buf = Buffer::new(&mut fs, Metrics::new(14.0, 21.0));
+                buf.set_hinting(&mut fs, hinting);
+                buf.set_tab_width(&mut fs, 8);
+                buf.set_wrap(&mut fs, Wrap::None);
+                let mut attrs = Attrs::new().family(Family::Name("Inter"));
+                if let Some(px) = ls_px {
+                    attrs = attrs.letter_spacing(px / 14.0);
+                }
+                buf.set_text(&mut fs, &text, &attrs, Shaping::Advanced, None);
+                buf.shape_until_scroll(&mut fs, false);
+
+                for run in buf.layout_runs() {
+                    let what = format!("{hinting:?} ls={ls_px:?} {text:?}");
+                    // Every advance runs forwards, so the pen never goes backwards.
+                    let mut pen = run.glyphs.first().map_or(0.0, |g| g.x);
+                    for g in run.glyphs {
+                        assert!(g.w >= 0.0, "{what}: a glyph advanced {} — backwards", g.w,);
+                        assert!(
+                            g.x >= pen - 0.01,
+                            "{what}: a glyph at {} sits left of the pen at {pen}",
+                            g.x,
+                        );
+                        pen = g.x + g.w;
+                    }
+                    let sum: f32 = run.glyphs.iter().map(|g| g.w).sum();
+                    assert!(
+                        (sum - run.line_w).abs() < 0.01,
+                        "{what}: line_w {} but the glyphs sum to {sum}",
+                        run.line_w,
+                    );
+                }
+            }
+        }
+    }
+}
+
+// `set_monospace_width` keeps every advance a multiple of the cell it was given.
+//
+// That is the whole point of the setting — a caller derives the width from a
+// terminal cell and needs the glyphs on that grid — and it is a default-features
+// API, so it must hold with hinting OFF even when a span also sets letter spacing.
+// Nothing else in this repository exercises `monospace_width` at all.
+#[test]
+fn monospace_width_keeps_advances_on_the_cell_grid() {
+    let mut fs = font_system();
+    let cell = 8.0f32;
+
+    for ls_px in [None, Some(0.12f32)] {
+        let mut buf = Buffer::new(&mut fs, Metrics::new(9.5, 14.25));
+        buf.set_hinting(&mut fs, Hinting::Disabled);
+        buf.set_monospace_width(&mut fs, Some(cell));
+        buf.set_wrap(&mut fs, Wrap::None);
+        let mut attrs = Attrs::new().family(Family::Name("Fira Mono"));
+        if let Some(px) = ls_px {
+            attrs = attrs.letter_spacing(px / 9.5);
+        }
+        buf.set_text(
+            &mut fs,
+            "MMMMMMMMMMMMMMMMMMMM",
+            &attrs,
+            Shaping::Advanced,
+            None,
+        );
+        buf.shape_until_scroll(&mut fs, false);
+
+        // The pitch the existing snap actually uses: the cell divided by the font
+        // size. (That it comes out in em where the advance is in px is older than
+        // any of this and deliberately left alone — the property under test is
+        // that advances are MULTIPLES of it, whatever it is.)
+        let pitch = cell / 9.5;
+        let run = buf.layout_runs().next().unwrap();
+        for g in run.glyphs {
+            let steps = g.w / pitch;
+            assert!(
+                (steps - steps.round()).abs() < 0.001,
+                "ls={ls_px:?}: advance {} is {steps} pitches of {pitch}, not a whole number",
+                g.w,
+            );
+        }
+    }
+}
