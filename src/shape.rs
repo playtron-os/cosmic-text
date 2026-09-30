@@ -427,40 +427,39 @@ fn shape_run_cached(
     end_run: usize,
     span_rtl: bool,
 ) {
-    use crate::{AttrsOwned, ShapeRunKey};
+    use crate::{ShapeRunCache, ShapeRunKey};
 
-    let run_range = start_run..end_run;
-    let mut key = ShapeRunKey {
-        text: line[run_range.clone()].to_string(),
-        default_attrs: AttrsOwned::new(&attrs_list.defaults()),
-        attrs_spans: Vec::new(),
-    };
-    for (attrs_range, attrs) in attrs_list.spans.overlapping(&run_range) {
-        if attrs == &key.default_attrs {
-            // Skip if attrs matches default attrs
-            continue;
-        }
-        let start = max(attrs_range.start, start_run).saturating_sub(start_run);
-        let end = min(attrs_range.end, end_run).saturating_sub(start_run);
-        if end > start {
-            let range = start..end;
-            key.attrs_spans.push((range, attrs.clone()));
-        }
-    }
-    if let Some(cache_glyphs) = font_system.shape_run_cache.get(&key) {
-        for mut glyph in cache_glyphs.iter().cloned() {
-            // Adjust glyph start and end to match run position
-            glyph.start += start_run;
-            glyph.end += start_run;
-            glyphs.push(glyph);
-        }
+    let run = start_run..end_run;
+    if run.len() > ShapeRunCache::MAX_RUN_LEN || font_system.shape_run_cache.max_glyphs() == 0 {
+        shape_run(
+            glyphs,
+            font_system,
+            line,
+            attrs_list,
+            start_run,
+            end_run,
+            span_rtl,
+        );
         return;
     }
 
-    // Fill in cache if not already set
-    let mut cache_glyphs = Vec::new();
+    if let Some(cached) = font_system
+        .shape_run_cache
+        .lookup(line, attrs_list, &run, span_rtl)
+    {
+        glyphs.extend(cached.iter().map(|glyph| {
+            let mut glyph = glyph.clone();
+            glyph.start += start_run;
+            glyph.end += start_run;
+            glyph
+        }));
+        return;
+    }
+
+    // `shape_run` leaves the glyphs before the run alone, so the run is the tail.
+    let glyph_start = glyphs.len();
     shape_run(
-        &mut cache_glyphs,
+        glyphs,
         font_system,
         line,
         attrs_list,
@@ -468,13 +467,18 @@ fn shape_run_cached(
         end_run,
         span_rtl,
     );
-    glyphs.extend_from_slice(&cache_glyphs);
-    for glyph in cache_glyphs.iter_mut() {
-        // Adjust glyph start and end to remove run position
-        glyph.start -= start_run;
-        glyph.end -= start_run;
-    }
-    font_system.shape_run_cache.insert(key, cache_glyphs);
+    let shaped = glyphs[glyph_start..]
+        .iter()
+        .map(|glyph| {
+            let mut glyph = glyph.clone();
+            glyph.start -= start_run;
+            glyph.end -= start_run;
+            glyph
+        })
+        .collect();
+    font_system
+        .shape_run_cache
+        .insert(ShapeRunKey::new(line, attrs_list, run, span_rtl), shaped);
 }
 
 #[cfg(feature = "swash")]
