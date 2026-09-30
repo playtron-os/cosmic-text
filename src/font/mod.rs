@@ -90,6 +90,12 @@ impl Font {
         self.data.data.data()
     }
 
+    /// The font's tables, parsed as harfrust parses them.
+    #[cfg(feature = "kern-fast-path")]
+    pub(crate) fn font_ref(&self) -> Option<FontRef<'_>> {
+        FontRef::from_index(self.data(), self.data.index).ok()
+    }
+
     pub fn shaper(&self) -> &harfrust::Shaper<'_> {
         self.harfrust.borrow_dependent()
     }

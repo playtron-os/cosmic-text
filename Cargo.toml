@@ -55,6 +55,7 @@ monospace_fallback = []
 no_std = ["hashbrown", "dep:libm", "skrifa/libm", "core_maths"]
 peniko = []
 shape-run-cache = []
+kern-fast-path = []
 std = [
     "fontdb/memmap",
     "fontdb/std",
