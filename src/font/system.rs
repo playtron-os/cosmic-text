@@ -283,7 +283,52 @@ impl FontSystem {
         // A shaped run is only valid for the fonts it was shaped against.
         #[cfg(feature = "shape-run-cache")]
         self.shape_run_cache.clear();
+        #[cfg(feature = "kern-fast-path")]
+        self.shape_buffer.kern_tables.clear();
         &mut self.db
+    }
+
+    /// Turns the kern-only fast path of [`Shaping::Advanced`](crate::Shaping) on or
+    /// off. It is on by default; turning it off shapes every run with harfrust.
+    ///
+    /// The fast path gives the same glyphs as harfrust, so this is for measuring
+    /// and verifying it.
+    #[cfg(feature = "kern-fast-path")]
+    pub fn set_kern_fast_path(&mut self, enabled: bool) {
+        self.shape_buffer.kern_tables.set_enabled(enabled);
+    }
+
+    /// How many runs the kern-only fast path has shaped, and how many it sent on
+    /// to harfrust, since it was last turned on.
+    #[cfg(feature = "kern-fast-path")]
+    #[doc(hidden)]
+    pub fn kern_fast_path_counts(&self) -> (usize, usize) {
+        self.shape_buffer.kern_tables.counts
+    }
+
+    /// The printable ASCII characters that runs in the font `attrs` selects can be
+    /// made of and still take the kern-only fast path, and the adjacent pairs of
+    /// them they may not hold; `latin` for runs with a letter. Anything else is
+    /// shaped by harfrust.
+    #[cfg(feature = "kern-fast-path")]
+    #[doc(hidden)]
+    pub fn kern_fast_path_rules(
+        &mut self,
+        attrs: &Attrs,
+        latin: bool,
+    ) -> Option<(String, Vec<String>)> {
+        // The font a run is shaped in first, as `shape_run` finds it.
+        let fonts = self.get_font_matches(attrs);
+        let families = [&attrs.family];
+        let mut fonts =
+            super::fallback::FontFallbackIter::new(self, &fonts, &families, &[], "", attrs.weight);
+        let font = fonts.next()?;
+        let ShapeBuffer {
+            kern_tables,
+            shape_plan_cache,
+            ..
+        } = fonts.shape_caches();
+        Some(kern_tables.describe(shape_plan_cache, &font, attrs, latin))
     }
 
     /// Consume this [`FontSystem`] and return the locale and database.

@@ -1,13 +1,15 @@
-//! Shaping through the shape-run cache must give exactly the glyphs that shaping
-//! every run afresh gives: the same glyph ids, fonts, clusters and advances, bit
-//! for bit, in each of the fonts below and over a corpus of UI text.
-#![cfg(feature = "shape-run-cache")]
+//! Shaping through the shape-run cache or the kern-only fast path must give exactly
+//! the glyphs harfrust gives when it shapes every run afresh: the same glyph ids,
+//! fonts, clusters and advances, bit for bit, in each of the fonts below and over a
+//! corpus of UI text.
+#![cfg(any(feature = "shape-run-cache", feature = "kern-fast-path"))]
 
 use cosmic_text::{
     fontdb, Attrs, AttrsList, Buffer, Color, Family, FeatureTag, FontFeatures, FontSystem, Metrics,
     ShapeLine, Shaping, Weight, Wrap,
 };
 
+/// The Kora and Humain faces, and Open Sans, which kerns with a legacy `kern` table.
 const FONTS: &[(&str, &[u8])] = &[
     ("Geist", include_bytes!("fonts/Geist-Regular.ttf")),
     ("Inter", include_bytes!("fonts/Inter-Regular.ttf")),
@@ -16,6 +18,7 @@ const FONTS: &[(&str, &[u8])] = &[
         include_bytes!("fonts/InstrumentSerif-Regular.ttf"),
     ),
     ("Geist Mono", include_bytes!("fonts/GeistMono-Regular.ttf")),
+    ("Open Sans", include_bytes!("fonts/OpenSans-Regular.ttf")),
 ];
 
 const HEBREW: &[u8] = include_bytes!("../fonts/NotoSansHebrew.ttf");
@@ -67,6 +70,24 @@ fn font_system() -> FontSystem {
     }
     db.load_font_data(HEBREW.to_vec());
     FontSystem::new_with_locale_and_db("en-US".into(), db)
+}
+
+/// A font system that shapes with the cache and fast path as asked. The reference
+/// is one with neither: harfrust shaping every run.
+fn configured(cache: bool, fast_path: bool) -> FontSystem {
+    let mut font_system = font_system();
+    #[cfg(feature = "shape-run-cache")]
+    if !cache {
+        font_system.shape_run_cache.set_max_glyphs(0);
+    }
+    #[cfg(feature = "kern-fast-path")]
+    font_system.set_kern_fast_path(fast_path);
+    let _ = (cache, fast_path);
+    font_system
+}
+
+fn reference() -> FontSystem {
+    configured(false, false)
 }
 
 fn shape(font_system: &mut FontSystem, text: &str, attrs_list: &AttrsList) -> Vec<Signature> {
@@ -136,6 +157,7 @@ fn attrs_lists(family: &'static str, text: &str) -> Vec<AttrsList> {
     ]
 }
 
+/// Every corpus line in every font and attribute list.
 fn cases() -> Vec<(String, AttrsList)> {
     let mut cases = Vec::new();
     for (family, _) in FONTS {
@@ -143,6 +165,50 @@ fn cases() -> Vec<(String, AttrsList)> {
             for attrs_list in attrs_lists(family, text) {
                 cases.push(((*text).to_string(), attrs_list));
             }
+        }
+    }
+    cases
+}
+
+/// Every ordered pair of printable ASCII characters as a word, and a spread of
+/// longer words, in every font: the kern-only path must agree with harfrust on
+/// each pair, and on runs of pairs.
+fn words() -> Vec<(String, AttrsList)> {
+    let printable: Vec<char> = ('!'..='~').collect();
+    let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+    let mut next = move |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as usize
+    };
+    let mut lines: Vec<String> = printable
+        .iter()
+        .map(|&a| {
+            printable
+                .iter()
+                .map(|&b| format!("{a}{b}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    for _ in 0..60 {
+        let line = (0..50)
+            .map(|_| {
+                let len = 3 + next(5);
+                (0..len)
+                    .map(|_| printable[next(printable.len())])
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(line);
+    }
+    let mut cases = Vec::new();
+    for (family, _) in FONTS {
+        let attrs = AttrsList::new(&Attrs::new().family(Family::Name(family)));
+        for line in &lines {
+            cases.push((line.clone(), attrs.clone()));
         }
     }
     cases
@@ -170,16 +236,13 @@ fn assert_same(
     }
 }
 
+#[cfg(feature = "shape-run-cache")]
 #[test]
 fn cached_shaping_matches_uncached_shaping() {
     let cases = cases();
+    let uncached = shape_all(&mut reference(), &cases);
 
-    let mut font_system = font_system();
-    font_system.shape_run_cache.set_max_glyphs(0);
-    let uncached = shape_all(&mut font_system, &cases);
-    assert!(font_system.shape_run_cache.is_empty());
-
-    let mut font_system = self::font_system();
+    let mut font_system = configured(true, false);
     let cold = shape_all(&mut font_system, &cases);
     assert!(!font_system.shape_run_cache.is_empty());
     let warm = shape_all(&mut font_system, &cases);
@@ -194,15 +257,86 @@ fn cached_shaping_matches_uncached_shaping() {
     assert_same(&uncached, &reversed, &backwards);
 }
 
+#[cfg(feature = "kern-fast-path")]
+#[test]
+fn the_kern_fast_path_matches_harfrust() {
+    for cases in [cases(), words()] {
+        let expected = shape_all(&mut reference(), &cases);
+        let mut font_system = configured(false, true);
+        let actual = shape_all(&mut font_system, &cases);
+        assert_same(&expected, &actual, &cases);
+
+        let (taken, declined) = font_system.kern_fast_path_counts();
+        println!("fast path took {taken} runs and sent {declined} to harfrust");
+        assert!(taken > declined, "the fast path should take most runs");
+        // A table that found the font doing more than its analysis allowed turns
+        // itself off, which keeps the output right but must not happen.
+        for (family, _) in FONTS {
+            let attrs = Attrs::new().family(Family::Name(family));
+            let (chars, _) = font_system.kern_fast_path_rules(&attrs, true).unwrap();
+            assert!(chars.contains('e'), "{family} gave up on the fast path");
+        }
+    }
+}
+
+#[cfg(all(feature = "shape-run-cache", feature = "kern-fast-path"))]
+#[test]
+fn the_cache_and_the_fast_path_together_match_harfrust() {
+    let mut cases = cases();
+    cases.extend(words());
+    let expected = shape_all(&mut reference(), &cases);
+    let mut font_system = configured(true, true);
+    for _ in 0..2 {
+        assert_same(&expected, &shape_all(&mut font_system, &cases), &cases);
+    }
+}
+
+/// What each font sends to harfrust: the characters its GSUB or GPOS could act on
+/// alone, and the adjacent pairs a ligature or contextual rule would start on.
+#[cfg(feature = "kern-fast-path")]
+#[test]
+fn the_fast_path_leaves_substitutions_to_harfrust() {
+    let printable: String = (' '..='~').collect();
+    let mut font_system = configured(false, true);
+    for (family, _) in FONTS {
+        let attrs = Attrs::new().family(Family::Name(family));
+        let (chars, pairs) = font_system.kern_fast_path_rules(&attrs, true).unwrap();
+        let (script_less, _) = font_system.kern_fast_path_rules(&attrs, false).unwrap();
+        let alone: String = printable.chars().filter(|&c| !chars.contains(c)).collect();
+        println!(
+            "{family}: harfrust shapes runs with any of {alone:?} or of the pairs {}",
+            pairs.join(" ")
+        );
+        assert!(chars.contains('e') && chars.contains('W') && chars.contains('o'));
+        assert!(script_less.chars().all(|c| !c.is_ascii_alphabetic()));
+    }
+
+    // Geist, Instrument Serif and Open Sans ligate "fi", Geist Mono draws "->" as
+    // an arrow, and Inter's contextual alternates turn the x of "2x3" into a times.
+    for (family, pair) in [
+        ("Geist", "fi"),
+        ("Instrument Serif", "fi"),
+        ("Open Sans", "fi"),
+        ("Geist Mono", "->"),
+        ("Inter", "x3"),
+    ] {
+        let attrs = Attrs::new().family(Family::Name(family));
+        let (chars, pairs) = font_system.kern_fast_path_rules(&attrs, true).unwrap();
+        let [a, b] = [pair.as_bytes()[0] as char, pair.as_bytes()[1] as char];
+        assert!(
+            !(chars.contains(a) && chars.contains(b)) || pairs.iter().any(|p| p == pair),
+            "{family} {pair}"
+        );
+    }
+}
+
+#[cfg(feature = "shape-run-cache")]
 #[test]
 fn a_bounded_cache_stays_within_its_bound_and_correct() {
     let cases = cases();
+    let uncached = shape_all(&mut reference(), &cases);
 
-    let mut font_system = font_system();
-    font_system.shape_run_cache.set_max_glyphs(0);
-    let uncached = shape_all(&mut font_system, &cases);
-
-    let mut font_system = self::font_system();
+    let mut font_system = configured(true, true);
     font_system.shape_run_cache.set_max_glyphs(300);
     for _ in 0..2 {
         let bounded = shape_all(&mut font_system, &cases);
@@ -218,16 +352,15 @@ fn the_same_text_right_to_left_is_a_different_run() {
     let attrs = AttrsList::new(&Attrs::new().family(Family::Name("Noto Sans Hebrew")));
     let lines = ["(", "שלום (", "שלום (עולם)", "(abc)", "שלום (abc) עולם"];
 
-    let mut font_system = font_system();
-    font_system.shape_run_cache.set_max_glyphs(0);
-    let uncached: Vec<_> = lines
+    let mut reference = reference();
+    let expected: Vec<_> = lines
         .iter()
-        .map(|line| shape(&mut font_system, line, &attrs))
+        .map(|line| shape(&mut reference, line, &attrs))
         .collect();
 
-    let mut font_system = self::font_system();
+    let mut font_system = configured(true, true);
     for _ in 0..2 {
-        for (line, expected) in lines.iter().zip(&uncached) {
+        for (line, expected) in lines.iter().zip(&expected) {
             assert_eq!(expected, &shape(&mut font_system, line, &attrs), "{line:?}");
         }
     }
@@ -236,16 +369,18 @@ fn the_same_text_right_to_left_is_a_different_run() {
 /// Changing the font database drops every shaped run: a run shaped before a font
 /// was loaded fell back to another font.
 #[test]
-fn loading_a_font_invalidates_the_cache() {
+fn loading_a_font_invalidates_what_was_shaped() {
     let mut db = fontdb::Database::new();
     db.load_font_data(FONTS[1].1.to_vec());
     let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), db);
     let attrs = AttrsList::new(&Attrs::new().family(Family::Name("Geist")));
 
     let before = shape(&mut font_system, "Kerning", &attrs);
+    #[cfg(feature = "shape-run-cache")]
     assert!(!font_system.shape_run_cache.is_empty());
 
     font_system.db_mut().load_font_data(FONTS[0].1.to_vec());
+    #[cfg(feature = "shape-run-cache")]
     assert!(font_system.shape_run_cache.is_empty());
     let after = shape(&mut font_system, "Kerning", &attrs);
 
@@ -257,12 +392,35 @@ fn loading_a_font_invalidates_the_cache() {
         .id;
     assert_ne!(before[0].4, geist);
     assert!(after.iter().all(|glyph| glyph.4 == geist));
+    assert_eq!(
+        after,
+        shape(
+            &mut reference_with(FONTS[1].1, FONTS[0].1, geist),
+            "Kerning",
+            &attrs
+        )
+    );
+}
+
+/// A reference font system holding `first` and then `second`, whose face ids match
+/// those of one that loaded `second` later.
+fn reference_with(first: &[u8], second: &[u8], expected: fontdb::ID) -> FontSystem {
+    let mut db = fontdb::Database::new();
+    db.load_font_data(first.to_vec());
+    db.load_font_data(second.to_vec());
+    let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), db);
+    assert!(font_system.db().face(expected).is_some());
+    #[cfg(feature = "shape-run-cache")]
+    font_system.shape_run_cache.set_max_glyphs(0);
+    #[cfg(feature = "kern-fast-path")]
+    font_system.set_kern_fast_path(false);
+    font_system
 }
 
 /// Cached runs hold advances in em, so one run serves every font size: laid-out
 /// glyphs match uncached shaping at each size, in every font.
 #[test]
-fn one_cached_run_serves_every_size() {
+fn one_shaped_run_serves_every_size() {
     type Placed = (usize, u16, fontdb::ID, [u32; 4]);
     fn layout(font_system: &mut FontSystem, family: &'static str, size: f32) -> Vec<Placed> {
         let mut buffer = Buffer::new(font_system, Metrics::new(size, size * 1.25));
@@ -296,15 +454,14 @@ fn one_cached_run_serves_every_size() {
             .collect()
     }
 
-    let mut uncached = font_system();
-    uncached.shape_run_cache.set_max_glyphs(0);
-    let mut cached = font_system();
+    let mut reference = reference();
+    let mut font_system = configured(true, true);
     for (family, _) in FONTS {
         for size in [11.0, 14.0, 17.5, 32.0] {
-            let expected = layout(&mut uncached, family, size);
+            let expected = layout(&mut reference, family, size);
             assert_eq!(
                 expected,
-                layout(&mut cached, family, size),
+                layout(&mut font_system, family, size),
                 "{family} at {size}px"
             );
         }

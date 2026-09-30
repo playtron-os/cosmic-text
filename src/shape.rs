@@ -5,7 +5,8 @@
 use crate::fallback::FontFallbackIter;
 use crate::{
     math, Align, Attrs, AttrsList, CacheKeyFlags, Color, Decoration, Ellipsize,
-    EllipsizeHeightLimit, Font, FontSystem, Hinting, LayoutGlyph, LayoutLine, Metrics, Wrap,
+    EllipsizeHeightLimit, Font, FontFeatures, FontSystem, Hinting, LayoutGlyph, LayoutLine,
+    Metrics, Wrap,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec, vec::Vec};
@@ -85,9 +86,8 @@ const NUM_SHAPE_PLANS: usize = 6;
 /// A set of buffers containing allocations for shaped text.
 #[derive(Default)]
 pub struct ShapeBuffer {
-    /// Cache for harfrust shape plans. Stores up to [`NUM_SHAPE_PLANS`] plans at once. Inserting a new one past that
-    /// will remove the one that was least recently added (not least recently used).
-    shape_plan_cache: VecDeque<(fontdb::ID, harfrust::ShapePlan)>,
+    /// Cache for harfrust shape plans.
+    pub(crate) shape_plan_cache: ShapePlans,
 
     /// Buffer for holding unicode text.
     harfrust_buffer: Option<harfrust::UnicodeBuffer>,
@@ -107,6 +107,10 @@ pub struct ShapeBuffer {
 
     /// Buffer for sets of layout glyphs.
     glyph_sets: Vec<Vec<LayoutGlyph>>,
+
+    /// What the kern-only fast path knows of the fonts it has shaped with.
+    #[cfg(feature = "kern-fast-path")]
+    pub(crate) kern_tables: crate::kern_only::KernTables,
 }
 
 impl fmt::Debug for ShapeBuffer {
@@ -126,10 +130,6 @@ fn shape_fallback(
     span_rtl: bool,
 ) -> Vec<usize> {
     let run = &line[start_run..end_run];
-
-    let font_scale = font.metrics().units_per_em as f32;
-    let ascent = font.metrics().ascent / font_scale;
-    let descent = -font.metrics().descent / font_scale;
 
     let mut buffer = scratch.harfrust_buffer.take().unwrap_or_default();
     buffer.set_direction(if span_rtl {
@@ -152,48 +152,16 @@ fn shape_fallback(
     assert_eq!(rtl, span_rtl);
 
     let attrs = attrs_list.get_span(start_run);
-    let mut rb_font_features = Vec::new();
-
-    // Convert attrs::Feature to harfrust::Feature
-    for feature in &attrs.font_features.features {
-        rb_font_features.push(harfrust::Feature::new(
-            harfrust::Tag::new(feature.tag.as_bytes()),
-            feature.value,
-            0..usize::MAX,
-        ));
-    }
+    let rb_font_features = harfrust_features(&attrs.font_features);
 
     let language = buffer.language();
-    let key = harfrust::ShapePlanKey::new(Some(buffer.script()), buffer.direction())
-        .features(&rb_font_features)
-        .instance(Some(font.shaper_instance()))
-        .language(language.as_ref());
-
-    let shape_plan = match scratch
-        .shape_plan_cache
-        .iter()
-        .find(|(id, plan)| *id == font.id() && key.matches(plan))
-    {
-        Some((_font_id, plan)) => plan,
-        None => {
-            let plan = harfrust::ShapePlan::new(
-                font.shaper(),
-                buffer.direction(),
-                Some(buffer.script()),
-                buffer.language().as_ref(),
-                &rb_font_features,
-            );
-            if scratch.shape_plan_cache.len() >= NUM_SHAPE_PLANS {
-                scratch.shape_plan_cache.pop_front();
-            }
-            scratch.shape_plan_cache.push_back((font.id(), plan));
-            &scratch
-                .shape_plan_cache
-                .back()
-                .expect("we just pushed the shape plan")
-                .1
-        }
-    };
+    let shape_plan = scratch.shape_plan_cache.get(
+        font,
+        buffer.direction(),
+        buffer.script(),
+        language.as_ref(),
+        &rb_font_features,
+    );
 
     let glyph_buffer = font
         .shaper()
@@ -211,68 +179,94 @@ fn shape_fallback(
             missing.push(start_glyph);
         }
 
-        let attrs = attrs_list.get_span(start_glyph);
-        let x_advance_unspaced = pos.x_advance as f32 / font_scale;
-        let x_advance =
-            x_advance_unspaced + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
-        let y_advance = pos.y_advance as f32 / font_scale;
-        let x_offset = pos.x_offset as f32 / font_scale;
-        let y_offset = pos.y_offset as f32 / font_scale;
-
-        glyphs.push(ShapeGlyph {
-            start: start_glyph,
-            end: end_run, // Set later
-            x_advance,
-            x_advance_unspaced,
-            y_advance,
-            x_offset,
-            y_offset,
-            ascent,
-            descent,
-            font_monospace_em_width: font.monospace_em_width(),
-            font_id: font.id(),
-            font_weight: attrs.weight,
-            glyph_id: info.glyph_id.try_into().expect("failed to cast glyph ID"),
-            //TODO: color should not be related to shaping
-            color_opt: attrs.color_opt,
-            metadata: attrs.metadata,
-            cache_key_flags: override_fake_italic(attrs.cache_key_flags, font, &attrs),
-            metrics_opt: attrs.metrics_opt.map(Into::into),
-            underline_opt: attrs.underline_opt,
-            strikethrough_opt: attrs.strikethrough_opt,
-            background_opt: attrs.background_opt,
-        });
+        glyphs.push(ShapeGlyph::shaped(
+            font,
+            attrs_list,
+            start_glyph,
+            end_run, // Set later
+            info.glyph_id.try_into().expect("failed to cast glyph ID"),
+            [pos.x_advance, pos.y_advance, pos.x_offset, pos.y_offset],
+        ));
     }
 
-    // Adjust end of glyphs
-    if rtl {
-        for i in glyph_start + 1..glyphs.len() {
-            let next_start = glyphs[i - 1].start;
-            let next_end = glyphs[i - 1].end;
-            let prev = &mut glyphs[i];
-            if prev.start == next_start {
-                prev.end = next_end;
-            } else {
-                prev.end = next_start;
-            }
-        }
-    } else {
-        for i in (glyph_start + 1..glyphs.len()).rev() {
-            let next_start = glyphs[i].start;
-            let next_end = glyphs[i].end;
-            let prev = &mut glyphs[i - 1];
-            if prev.start == next_start {
-                prev.end = next_end;
-            } else {
-                prev.end = next_start;
-            }
-        }
-    }
+    set_cluster_ends(&mut glyphs[glyph_start..], rtl);
 
     // Restore the buffer to save an allocation.
     scratch.harfrust_buffer = Some(glyph_buffer.clear());
 
     missing
+}
+
+/// Recently built harfrust shape plans. Holds up to [`NUM_SHAPE_PLANS`]; adding one
+/// past that drops the one added least recently (not the least recently used).
+#[derive(Default)]
+pub(crate) struct ShapePlans(VecDeque<(fontdb::ID, harfrust::ShapePlan)>);
+
+impl ShapePlans {
+    /// The plan for shaping text in `font`, building it if it is not held.
+    pub(crate) fn get(
+        &mut self,
+        font: &Font,
+        direction: harfrust::Direction,
+        script: harfrust::Script,
+        language: Option<&harfrust::Language>,
+        features: &[harfrust::Feature],
+    ) -> &harfrust::ShapePlan {
+        let key = harfrust::ShapePlanKey::new(Some(script), direction)
+            .features(features)
+            .instance(Some(font.shaper_instance()))
+            .language(language);
+        if let Some(index) = self
+            .0
+            .iter()
+            .position(|(id, plan)| *id == font.id() && key.matches(plan))
+        {
+            return &self.0[index].1;
+        }
+        let plan =
+            harfrust::ShapePlan::new(font.shaper(), direction, Some(script), language, features);
+        if self.0.len() >= NUM_SHAPE_PLANS {
+            self.0.pop_front();
+        }
+        self.0.push_back((font.id(), plan));
+        &self.0.back().expect("we just pushed the shape plan").1
+    }
+}
+
+/// `features` as harfrust takes them, each over the whole run.
+pub(crate) fn harfrust_features(features: &FontFeatures) -> Vec<harfrust::Feature> {
+    features
+        .features
+        .iter()
+        .map(|feature| {
+            harfrust::Feature::new(
+                harfrust::Tag::new(feature.tag.as_bytes()),
+                feature.value,
+                0..usize::MAX,
+            )
+        })
+        .collect()
+}
+
+/// Ends each glyph's cluster where the next one in the text starts. The glyph
+/// that ends the run keeps the end it was made with.
+pub(crate) fn set_cluster_ends(glyphs: &mut [ShapeGlyph], rtl: bool) {
+    let len = glyphs.len();
+    for i in 1..len {
+        // Text order is glyph order left to right, and reversed right to left.
+        let (prev, next) = if rtl {
+            (i, i - 1)
+        } else {
+            (len - 1 - i, len - i)
+        };
+        let (next_start, next_end) = (glyphs[next].start, glyphs[next].end);
+        let prev = &mut glyphs[prev];
+        prev.end = if prev.start == next_start {
+            next_end
+        } else {
+            next_start
+        };
+    }
 }
 
 fn shape_run(
@@ -290,12 +284,15 @@ fn shape_run(
         scripts.clear();
         scripts
     };
-    for c in line[start_run..end_run].chars() {
-        match c.script() {
-            Script::Common | Script::Inherited | Script::Latin | Script::Unknown => (),
-            script => {
-                if !scripts.contains(&script) {
-                    scripts.push(script);
+    // ASCII is Latin or Common, which never need a script's fallback fonts.
+    if !line[start_run..end_run].is_ascii() {
+        for c in line[start_run..end_run].chars() {
+            match c.script() {
+                Script::Common | Script::Inherited | Script::Latin | Script::Unknown => (),
+                script => {
+                    if !scripts.contains(&script) {
+                        scripts.push(script);
+                    }
                 }
             }
         }
@@ -318,6 +315,28 @@ fn shape_run(
     );
 
     let font = font_iter.next().expect("no default font found");
+
+    #[cfg(feature = "kern-fast-path")]
+    if !span_rtl {
+        let ShapeBuffer {
+            kern_tables,
+            shape_plan_cache,
+            ..
+        } = font_iter.shape_caches();
+        if kern_tables.shape(
+            shape_plan_cache,
+            glyphs,
+            &font,
+            &attrs,
+            line,
+            attrs_list,
+            start_run,
+            end_run,
+        ) {
+            font_system.shape_buffer.scripts = scripts;
+            return;
+        }
+    }
 
     let glyph_start = glyphs.len();
     let mut missing = {
@@ -504,8 +523,6 @@ fn shape_skip(
     );
 
     let font = font_iter.next().expect("no default font found");
-    let font_id = font.id();
-    let font_monospace_em_width = font.monospace_em_width();
     let swash_font = font.as_swash();
 
     let charmap = swash_font.charmap();
@@ -516,43 +533,28 @@ fn shape_skip(
 
     let ascent = metrics.ascent / upem;
     let descent = metrics.descent / upem;
+    // Basic shaping spaces every glyph by the run's letter spacing.
+    let letter_spacing = attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
 
     glyphs.extend(
         line[start_run..end_run]
             .char_indices()
             .map(|(chr_idx, codepoint)| {
                 let glyph_id = charmap.map(codepoint);
-                let x_advance_unspaced = glyph_metrics.advance_width(glyph_id) / upem;
-                let x_advance =
-                    x_advance_unspaced + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
-                let attrs = attrs_list.get_span(start_run + chr_idx);
-
-                ShapeGlyph {
-                    start: chr_idx + start_run,
-                    end: chr_idx + start_run + codepoint.len_utf8(),
-                    x_advance,
-                    x_advance_unspaced,
-                    y_advance: 0.0,
-                    x_offset: 0.0,
-                    y_offset: 0.0,
+                let start = chr_idx + start_run;
+                ShapeGlyph::new(
+                    &font,
+                    &attrs_list.get_span(start),
+                    start..start + codepoint.len_utf8(),
+                    glyph_id,
+                    glyph_metrics.advance_width(glyph_id) / upem,
+                    letter_spacing,
+                    0.0,
+                    0.0,
+                    0.0,
                     ascent,
                     descent,
-                    font_monospace_em_width,
-                    font_id,
-                    font_weight: attrs.weight,
-                    glyph_id,
-                    color_opt: attrs.color_opt,
-                    metadata: attrs.metadata,
-                    cache_key_flags: override_fake_italic(
-                        attrs.cache_key_flags,
-                        font.as_ref(),
-                        &attrs,
-                    ),
-                    metrics_opt: attrs.metrics_opt.map(Into::into),
-                    underline_opt: attrs.underline_opt,
-                    strikethrough_opt: attrs.strikethrough_opt,
-                    background_opt: attrs.background_opt,
-                }
+                )
             }),
     );
 }
@@ -632,6 +634,73 @@ impl Advance {
 }
 
 impl ShapeGlyph {
+    /// A glyph of `font` for the text from `range.start`, in em units, with the
+    /// attributes it is shaped with.
+    fn new(
+        font: &Font,
+        attrs: &Attrs,
+        range: Range<usize>,
+        glyph_id: u16,
+        x_advance_unspaced: f32,
+        letter_spacing: f32,
+        y_advance: f32,
+        x_offset: f32,
+        y_offset: f32,
+        ascent: f32,
+        descent: f32,
+    ) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+            x_advance: x_advance_unspaced + letter_spacing,
+            x_advance_unspaced,
+            y_advance,
+            x_offset,
+            y_offset,
+            ascent,
+            descent,
+            font_monospace_em_width: font.monospace_em_width(),
+            font_id: font.id(),
+            font_weight: attrs.weight,
+            glyph_id,
+            //TODO: color should not be related to shaping
+            color_opt: attrs.color_opt,
+            metadata: attrs.metadata,
+            cache_key_flags: override_fake_italic(attrs.cache_key_flags, font, attrs),
+            metrics_opt: attrs.metrics_opt.map(Into::into),
+            underline_opt: attrs.underline_opt,
+            strikethrough_opt: attrs.strikethrough_opt,
+            background_opt: attrs.background_opt,
+        }
+    }
+
+    /// A glyph placed by harfrust, from its position in font units. Its cluster
+    /// runs to `end` until [`set_cluster_ends`] ends it where the next one starts.
+    pub(crate) fn shaped(
+        font: &Font,
+        attrs_list: &AttrsList,
+        start: usize,
+        end: usize,
+        glyph_id: u16,
+        [x_advance, y_advance, x_offset, y_offset]: [i32; 4],
+    ) -> Self {
+        let font_scale = font.metrics().units_per_em as f32;
+        let attrs = attrs_list.get_span(start);
+        Self::new(
+            font,
+            &attrs,
+            start..end,
+            glyph_id,
+            x_advance as f32 / font_scale,
+            attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0),
+            y_advance as f32 / font_scale,
+            x_offset as f32 / font_scale,
+            y_offset as f32 / font_scale,
+            font.metrics().ascent / font_scale,
+            -font.metrics().descent / font_scale,
+        )
+    }
+
     /// The font size this glyph is laid out at, and its advance in pixels.
     ///
     /// The one place an em advance becomes a pixel advance. Call it from anything
