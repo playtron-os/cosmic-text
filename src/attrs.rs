@@ -523,6 +523,11 @@ impl AttrsList {
         self.defaults.as_attrs()
     }
 
+    /// The default attributes, without cloning them.
+    pub(crate) const fn defaults_owned(&self) -> &AttrsOwned {
+        &self.defaults
+    }
+
     /// Get the current attribute spans
     pub fn spans(&self) -> Vec<(&Range<usize>, &AttrsOwned)> {
         self.spans_iter().collect()

@@ -280,6 +280,9 @@ impl FontSystem {
     /// Get a mutable reference to the database.
     pub fn db_mut(&mut self) -> &mut fontdb::Database {
         self.font_matches_cache.clear();
+        // A shaped run is only valid for the fonts it was shaped against.
+        #[cfg(feature = "shape-run-cache")]
+        self.shape_run_cache.clear();
         &mut self.db
     }
 
