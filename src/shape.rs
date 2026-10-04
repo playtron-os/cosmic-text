@@ -2745,13 +2745,10 @@ impl ShapeLine {
                                         total_line_height,
                                         &mut current_visual_line,
                                         advance,
+                                        // The wrap's blank stays on the line it ended.
                                         Some(SpanWordGlyphPos::with_wordglyph(
                                             span_index,
-                                            if i > 0 && span.words[i - 1].blank {
-                                                WordGlyphPos::new(i - 1, 0)
-                                            } else {
-                                                WordGlyphPos::new(i, 0)
-                                            },
+                                            WordGlyphPos::new(i + usize::from(word.blank), 0),
                                         )),
                                         width_opt,
                                         ellipsize,

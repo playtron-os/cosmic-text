@@ -11,8 +11,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     Affinity, Align, Attrs, AttrsList, BidiParagraphs, BorrowedWithFontSystem, BufferLine, Color,
-    Cursor, Ellipsize, FontSystem, Hinting, LayoutCursor, LayoutGlyph, LayoutLine, LineEnding,
-    LineIter, Motion, Renderer, Scroll, ShapeLine, Shaping, Wrap,
+    Cursor, Ellipsize, EllipsizeHeightLimit, FontSystem, Hinting, LayoutCursor, LayoutGlyph,
+    LayoutLine, LineEnding, LineIter, Motion, Renderer, Scroll, ShapeLine, Shaping, Wrap,
 };
 
 /// A line of visible text for rendering
@@ -301,7 +301,7 @@ impl Buffer {
                     self.metrics.font_size,
                     self.width_opt,
                     self.wrap,
-                    self.ellipsize,
+                    clamp_to_lines(self.ellipsize, line, self.metrics),
                     self.monospace_width,
                     self.tab_width,
                     self.hinting,
@@ -546,7 +546,7 @@ impl Buffer {
             self.metrics.font_size,
             self.width_opt,
             self.wrap,
-            self.ellipsize,
+            clamp_to_lines(self.ellipsize, line, self.metrics),
             self.monospace_width,
             self.tab_width,
             self.hinting,
@@ -1516,5 +1516,30 @@ impl BorrowedWithFontSystem<'_, Buffer> {
         F: FnMut(i32, i32, u32, u32, Color),
     {
         self.inner.draw(self.font_system, cache, color, f);
+    }
+}
+
+/// A height limit as the whole lines it holds, so a box exactly `n` lines tall clamps to
+/// `n` lines, as CSS `-webkit-line-clamp` does. The layout counts in the line's own height.
+fn clamp_to_lines(ellipsize: Ellipsize, line: &BufferLine, metrics: Metrics) -> Ellipsize {
+    let line_height = line
+        .attrs_list()
+        .defaults()
+        .metrics_opt
+        .map_or(metrics.line_height, |m| Metrics::from(m).line_height);
+    let lines = |height: f32| {
+        if line_height > 0.0 && height.is_finite() {
+            // A sliver under the limit still counts: the height may carry rounding.
+            let whole = (height / line_height + 1.0e-3).floor().max(1.0);
+            EllipsizeHeightLimit::Lines(whole as usize)
+        } else {
+            EllipsizeHeightLimit::Height(height)
+        }
+    };
+    match ellipsize {
+        Ellipsize::Start(EllipsizeHeightLimit::Height(h)) => Ellipsize::Start(lines(h)),
+        Ellipsize::Middle(EllipsizeHeightLimit::Height(h)) => Ellipsize::Middle(lines(h)),
+        Ellipsize::End(EllipsizeHeightLimit::Height(h)) => Ellipsize::End(lines(h)),
+        other => other,
     }
 }
