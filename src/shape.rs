@@ -1742,6 +1742,7 @@ impl ShapeLine {
         ellipsize: Ellipsize,
         ellipsis_w: f32,
         direction: LayoutDirection,
+        whole_words: bool,
     ) {
         let check_ellipsizing = matches!(ellipsize, Ellipsize::Start(_) | Ellipsize::End(_))
             && width_opt.is_some_and(|w| w > 0.0 && w.is_finite());
@@ -1848,6 +1849,41 @@ impl ShapeLine {
                 };
 
                 if overflowing {
+                    if whole_words
+                        && word_forward
+                        && congruent
+                        && !word.blank
+                        && total_w + word_range_width + word_width > max_width
+                    {
+                        let first = if span_index == start.span {
+                            start.word
+                        } else {
+                            0
+                        };
+                        let (mut end, mut kept_w, mut blanks) =
+                            (word_idx, word_range_width, number_of_blanks);
+                        while end > first && span.words[end - 1].blank {
+                            end -= 1;
+                            kept_w -= span.words[end].width_px(advance);
+                            blanks = blanks.saturating_sub(1);
+                        }
+                        if end > first && total_w + kept_w + ellipsis_w <= max_width {
+                            self.add_to_visual_line(
+                                current_visual_line,
+                                span_index,
+                                if span_index == start.span {
+                                    start.word_glyph_pos()
+                                } else {
+                                    WordGlyphPos::ZERO
+                                },
+                                WordGlyphPos::new(end, 0),
+                                kept_w,
+                                blanks,
+                            );
+                            current_visual_line.ellipsized = true;
+                            break 'outer;
+                        }
+                    }
                     // overflow detected
                     let available = (max_width - ellipsis_w).max(0.0);
 
@@ -1994,6 +2030,7 @@ impl ShapeLine {
             Ellipsize::End(EllipsizeHeightLimit::Lines(1)),
             0., //pass 0 for ellipsis_w
             LayoutDirection::Forward,
+            false,
         );
         let forward_pass_overflowed = starting_line.ellipsized;
         let end_range_opt = starting_line.ranges.last();
@@ -2025,6 +2062,7 @@ impl ShapeLine {
                     Ellipsize::Start(EllipsizeHeightLimit::Lines(1)),
                     0., //pass 0 for ellipsis_w
                     LayoutDirection::Backward,
+                    false,
                 );
                 // Check if anything was actually skipped between the two halves
                 let first_half_end = if spans[range.span].level.is_rtl() != rtl {
@@ -2085,6 +2123,7 @@ impl ShapeLine {
                         Ellipsize::None,
                         0., //pass 0 for ellipsis_w
                         LayoutDirection::Backward,
+                        false,
                     );
                     return;
                 }
@@ -2226,6 +2265,7 @@ impl ShapeLine {
         rtl: bool,
         width_opt: Option<f32>,
         ellipsize: Ellipsize,
+        whole_words: bool,
     ) {
         let ellipsis_w = self.ellipsis_w(advance);
 
@@ -2241,6 +2281,7 @@ impl ShapeLine {
                     ellipsize,
                     ellipsis_w,
                     LayoutDirection::Backward,
+                    whole_words,
                 );
                 // Insert ellipsis at the visual start (index 0, after backward reversal)
                 if current_visual_line.ellipsized {
@@ -2275,6 +2316,7 @@ impl ShapeLine {
                     ellipsize,
                     ellipsis_w,
                     LayoutDirection::Forward,
+                    whole_words,
                 );
                 // Insert ellipsis at the visual end
                 if current_visual_line.ellipsized {
@@ -2351,6 +2393,7 @@ impl ShapeLine {
                 self.rtl,
                 width_opt,
                 ellipsize,
+                false,
             );
         } else {
             let mut total_line_height = 0.0;
@@ -2393,6 +2436,7 @@ impl ShapeLine {
                         self.rtl,
                         width_opt,
                         ellipsize,
+                        wrap != Wrap::Glyph,
                     );
                     return true;
                 }

@@ -74,3 +74,17 @@ fn the_ellipsized_line_starts_at_its_first_word() {
         );
     }
 }
+
+#[test]
+fn the_clamped_line_ends_at_a_whole_word() {
+    let mut fs = font_system();
+    for wrap in [Wrap::Word, Wrap::WordOrGlyph] {
+        let got = clamp(&mut fs, wrap, 18.0, 36.0);
+        let last = got.last().expect("a line");
+        let kept = last.trim_end_matches('…');
+        assert!(
+            TEXT.split(' ').any(|word| kept.ends_with(word)) && !kept.ends_with(' '),
+            "{wrap:?}: the clamped line ends mid-word or on a blank: {last:?}"
+        );
+    }
+}
