@@ -2351,6 +2351,37 @@ impl ShapeLine {
         match_mono_width: Option<f32>,
         hinting: Hinting,
     ) {
+        self.layout_to_buffer_with_breaks(
+            scratch,
+            font_size,
+            width_opt,
+            wrap,
+            ellipsize,
+            align,
+            layout_lines,
+            match_mono_width,
+            hinting,
+            &[],
+        );
+    }
+
+    /// [`Self::layout_to_buffer`], also starting a new visual line at every word that
+    /// begins at one of the sorted byte offsets in `breaks`; see
+    /// [`crate::BufferLine::set_wrap_breaks`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn layout_to_buffer_with_breaks(
+        &self,
+        scratch: &mut ShapeBuffer,
+        font_size: f32,
+        width_opt: Option<f32>,
+        wrap: Wrap,
+        ellipsize: Ellipsize,
+        align: Option<Align>,
+        layout_lines: &mut Vec<LayoutLine>,
+        match_mono_width: Option<f32>,
+        hinting: Hinting,
+        breaks: &[usize],
+    ) {
         // One value, built once, so measuring and placing cannot disagree about how
         // wide a glyph is — see `ShapeGlyph::advance_px`.
         let advance = Advance {
@@ -2649,12 +2680,23 @@ impl ShapeLine {
                         let mut fitting_start = WordGlyphPos::ZERO;
                         for (i, word) in span.words.iter().enumerate() {
                             let word_width = word.width_px(advance);
-                            if current_visual_line.w + (word_range_width + word_width)
+                            // A word a caller asked to start a line wraps as if it overflowed.
+                            let forced = wrap != Wrap::Glyph
+                                && !word.blank
+                                && current_visual_line.w + word_range_width > 0.
+                                && word
+                                    .glyphs
+                                    .iter()
+                                    .map(|glyph| glyph.start)
+                                    .min()
+                                    .is_some_and(|start| breaks.binary_search(&start).is_ok());
+                            if !forced
+                                && (current_visual_line.w + (word_range_width + word_width)
                             <= width_opt.unwrap_or(f32::INFINITY)
                             // Include one blank word over the width limit since it won't be
                             // counted in the final width.
                             || (word.blank
-                                && (current_visual_line.w + word_range_width) <= width_opt.unwrap_or(f32::INFINITY))
+                                && (current_visual_line.w + word_range_width) <= width_opt.unwrap_or(f32::INFINITY)))
                             {
                                 // fits
                                 if word.blank {
