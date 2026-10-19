@@ -20,6 +20,7 @@ pub struct BufferLine {
     layout_opt: Cached<Vec<LayoutLine>>,
     shaping: Shaping,
     metadata: Option<usize>,
+    wrap_breaks: Vec<usize>,
 }
 
 impl BufferLine {
@@ -41,6 +42,7 @@ impl BufferLine {
             layout_opt: Cached::Empty,
             shaping,
             metadata: None,
+            wrap_breaks: Vec::new(),
         }
     }
 
@@ -62,6 +64,7 @@ impl BufferLine {
         self.layout_opt.set_unused();
         self.shaping = shaping;
         self.metadata = None;
+        self.wrap_breaks.clear();
     }
 
     /// Get current text
@@ -193,10 +196,36 @@ impl BufferLine {
         new
     }
 
-    /// Reset shaping, layout, and metadata caches
+    /// Reset shaping, layout, and metadata caches, and the wrap breaks
     pub fn reset(&mut self) {
         self.metadata = None;
+        self.wrap_breaks.clear();
         self.reset_shaping();
+    }
+
+    /// Byte offsets the line must wrap before, besides where it runs out of width
+    pub fn wrap_breaks(&self) -> &[usize] {
+        &self.wrap_breaks
+    }
+
+    /// Make a word that starts at one of these byte offsets begin a new visual line.
+    ///
+    /// Wrapping still breaks wherever a line runs out of width, so a caller that picks
+    /// its own breaks, such as a balancing or Knuth–Plass line breaker, lists the start
+    /// of every line after the first. An offset inside a word, or at the start of a
+    /// line, does nothing. Only [`Wrap::Word`] and [`Wrap::WordOrGlyph`] honor them, in
+    /// left-to-right text. Will reset layout if the breaks change. Returns true if the
+    /// line was reset.
+    pub fn set_wrap_breaks(&mut self, mut breaks: Vec<usize>) -> bool {
+        breaks.sort_unstable();
+        breaks.dedup();
+        if breaks != self.wrap_breaks {
+            self.wrap_breaks = breaks;
+            self.reset_layout();
+            true
+        } else {
+            false
+        }
     }
 
     /// Reset shaping and layout caches
@@ -255,8 +284,10 @@ impl BufferLine {
                 .layout_opt
                 .take_unused()
                 .unwrap_or_else(|| Vec::with_capacity(1));
+            // Out of `self` while `shape` borrows it.
+            let breaks = mem::take(&mut self.wrap_breaks);
             let shape = self.shape(font_system, tab_width);
-            shape.layout_to_buffer(
+            shape.layout_to_buffer_with_breaks(
                 &mut font_system.shape_buffer,
                 font_size,
                 width_opt,
@@ -266,7 +297,9 @@ impl BufferLine {
                 &mut layout,
                 match_mono_width,
                 hinting,
+                &breaks,
             );
+            self.wrap_breaks = breaks;
             self.layout_opt.set_used(layout);
         }
         self.layout_opt.get().expect("layout not found")
@@ -301,6 +334,7 @@ impl BufferLine {
             layout_opt: Cached::Empty,
             shaping: Shaping::Advanced,
             metadata: None,
+            wrap_breaks: Vec::new(),
         }
     }
 
