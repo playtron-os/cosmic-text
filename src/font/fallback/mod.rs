@@ -280,9 +280,10 @@ impl<'a> FontFallbackIter<'a> {
         let default_family = self.default_families[self.default_i - 1];
         let default_family_name = self.font_system.db().family_name(default_family);
 
+        // Within a family the keys run nearest weight first. Like a browser, use a family at its
+        // nearest weight rather than skip it; the fallback families below do the same.
         self.font_match_keys
             .iter()
-            .filter(|m_key| m_key.font_weight_diff == 0)
             .find(|m_key| self.face_contains_family(m_key.id, default_family_name))
     }
 
@@ -295,12 +296,6 @@ impl<'a> FontFallbackIter<'a> {
                 return Some(font);
             }
         }
-
-        let font_match_keys_iter = |is_mono| {
-            self.font_match_keys
-                .iter()
-                .filter(move |m_key| m_key.font_weight_diff == 0 || is_mono)
-        };
 
         'DEF_FAM: while self.default_i < self.default_families.len() {
             self.default_i += 1;
@@ -372,7 +367,7 @@ impl<'a> FontFallbackIter<'a> {
                 Vec::new()
             };
 
-            for m_key in font_match_keys_iter(is_mono) {
+            for m_key in self.font_match_keys {
                 if Some(m_key.id) != default_font_match_key.as_ref().map(|m_key| m_key.id) {
                     let is_mono_id = if mono_ids_for_scripts.is_empty() {
                         self.font_system.is_monospace(m_key.id)
@@ -424,7 +419,7 @@ impl<'a> FontFallbackIter<'a> {
             while self.script_i.1 < script_families.len() {
                 let script_family = script_families[self.script_i.1];
                 self.script_i.1 += 1;
-                for m_key in font_match_keys_iter(false) {
+                for m_key in self.font_match_keys {
                     if self.face_contains_family(m_key.id, script_family) {
                         if let Some(font) = self.font_system.get_font(m_key.id, self.ideal_weight) {
                             return Some(font);
@@ -447,7 +442,7 @@ impl<'a> FontFallbackIter<'a> {
         while self.common_i < common_families.len() {
             let common_family = common_families[self.common_i];
             self.common_i += 1;
-            for m_key in font_match_keys_iter(false) {
+            for m_key in self.font_match_keys {
                 if self.face_contains_family(m_key.id, common_family) {
                     if let Some(font) = self.font_system.get_font(m_key.id, self.ideal_weight) {
                         return Some(font);
